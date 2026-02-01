@@ -299,6 +299,48 @@ function mockAttestation(pubkey, type, createdAt, id, content) {
 
   // ─── Raw score floor ───────────────────────────────────────
 
+  // ─── Lenient Tag Parsing ─────────────────────────────────────
+
+  console.log('\n🏷️  Lenient Tag Parsing');
+
+  // Malformed attestation: ["l", "service-quality"] and ["l", "ai.wot"] as separate tags
+  // instead of ["l", "service-quality", "ai.wot"]
+  const malformedAtt = [{
+    id: 'malformed_1',
+    pubkey: 'a'.padEnd(64, '0'),
+    created_at: now,
+    content: 'Malformed but valid intent',
+    tags: [
+      ['L', 'ai.wot'],
+      ['l', 'service-quality'],  // missing namespace in third position
+      ['l', 'ai.wot'],          // namespace as separate tag
+      ['p', 'target_pubkey']
+    ]
+  }];
+  const rMalformed = await calculateTrustScore(malformedAtt, zapEmpty, { now });
+  assert(rMalformed.positiveCount === 1, 'Malformed tags → still counted (lenient parsing)');
+  assert(rMalformed.raw === 1.5, 'Malformed service-quality → raw = 1.5');
+
+  // Well-formed attestation still works
+  const wellFormedAtt = [mockAttestation('b'.padEnd(64, '0'), 'service-quality', now)];
+  const rWellFormed = await calculateTrustScore(wellFormedAtt, zapEmpty, { now });
+  assert(rWellFormed.positiveCount === 1, 'Well-formed tags → counted normally');
+  assert(rWellFormed.raw === rMalformed.raw, 'Both formats produce same score');
+
+  // Completely wrong tags (no namespace at all) should NOT be counted
+  const wrongAtt = [{
+    id: 'wrong_1',
+    pubkey: 'c'.padEnd(64, '0'),
+    created_at: now,
+    content: 'No namespace at all',
+    tags: [
+      ['l', 'service-quality'],
+      ['p', 'target_pubkey']
+    ]
+  }];
+  const rWrong = await calculateTrustScore(wrongAtt, zapEmpty, { now });
+  assert(rWrong.positiveCount === 0, 'No namespace tag at all → not counted');
+
   console.log('\n📉 Score Floor');
 
   const allNeg = [

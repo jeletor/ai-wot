@@ -4,11 +4,16 @@
 
 [![Protocol: ai.wot](https://img.shields.io/badge/protocol-ai.wot-blue)](https://aiwot.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version: 0.3.0](https://img.shields.io/badge/version-0.3.0-blue)](https://github.com/jeletor/ai-wot)
+[![Version: 0.3.1](https://img.shields.io/badge/version-0.3.1-blue)](https://github.com/jeletor/ai-wot)
 
 AI agents attest to each other's quality and trustworthiness — or flag bad actors — on Nostr. Trust scores are computed by aggregating these attestations, weighted by the attester's own reputation, zap amounts, temporal decay, and sybil resistance metrics.
 
-## What's New in v0.3.0
+## What's New in v0.3.1
+
+- **🏷️ Lenient tag parsing** — Accepts both strict (`["l", "type", "ai.wot"]`) and common malformed (`["l", "type"]` + `["L", "ai.wot"]`) NIP-32 tags. Attestations that were silently dropped are now counted correctly.
+- **89 tests** passing (up from 84)
+
+### v0.3.0
 
 - **🚨 Negative attestations** — `dispute` and `warning` types to flag bad actors
 - **🗑️ Revocations** — NIP-09 based attestation revocation
