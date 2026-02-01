@@ -1,14 +1,23 @@
 #!/usr/bin/env node
 // ai-wot CLI — Web of Trust for AI agents on Nostr
+// v0.3.0: Added dispute, warn, revoke commands; diversity in output
+//
 // Usage:
 //   ai-wot attest <pubkey> <type> "<comment>"
+//   ai-wot dispute <pubkey> "<reason>"
+//   ai-wot warn <pubkey> "<reason>"
+//   ai-wot revoke <event-id> "<reason>"
 //   ai-wot lookup <pubkey>
 //   ai-wot score <pubkey>
 //   ai-wot my-score
+//   ai-wot help
 
 const path = require('path');
 const fs = require('fs');
 const wot = require('../lib/wot');
+const { NEGATIVE_TYPES, POSITIVE_TYPES } = require('../lib/scoring');
+
+const VERSION = '0.3.0';
 
 // ─── Key Loading ────────────────────────────────────────────────
 
@@ -53,7 +62,8 @@ function loadKeys() {
 async function attestCommand(args) {
   if (args.length < 3) {
     console.error('Usage: ai-wot attest <pubkey> <type> "<comment>" [--event <event-id>]');
-    console.error('\nTypes: service-quality, identity-continuity, general-trust');
+    console.error(`\nPositive types: ${POSITIVE_TYPES.join(', ')}`);
+    console.error(`Negative types: ${NEGATIVE_TYPES.join(', ')} (use 'dispute' or 'warn' shorthand instead)`);
     process.exit(1);
   }
 
@@ -79,7 +89,10 @@ async function attestCommand(args) {
     process.exit(1);
   }
 
-  console.log('📝 Publishing attestation...');
+  const isNeg = NEGATIVE_TYPES.includes(type);
+  const icon = isNeg ? '⚠️' : '📝';
+
+  console.log(`${icon} Publishing ${isNeg ? 'NEGATIVE ' : ''}attestation...`);
   console.log(`   Target: ${targetPubkey.substring(0, 16)}...`);
   console.log(`   Type:   ${type}`);
   console.log(`   Comment: "${comment}"`);
@@ -101,6 +114,67 @@ async function attestCommand(args) {
 
   if (successCount > 0) {
     console.log(`\n🔗 View: https://primal.net/e/${event.id}`);
+  }
+}
+
+async function disputeCommand(args) {
+  if (args.length < 2) {
+    console.error('Usage: ai-wot dispute <pubkey> "<reason>" [--event <event-id>]');
+    console.error('\nPublish a dispute (strong negative attestation, -1.5x weight).');
+    console.error('Reason is REQUIRED — you must explain what went wrong.');
+    process.exit(1);
+  }
+
+  // Delegate to attestCommand with type pre-filled
+  return attestCommand([args[0], 'dispute', ...args.slice(1)]);
+}
+
+async function warnCommand(args) {
+  if (args.length < 2) {
+    console.error('Usage: ai-wot warn <pubkey> "<reason>" [--event <event-id>]');
+    console.error('\nPublish a warning (mild negative attestation, -0.8x weight).');
+    console.error('Reason is REQUIRED — you must explain the concern.');
+    process.exit(1);
+  }
+
+  // Delegate to attestCommand with type pre-filled
+  return attestCommand([args[0], 'warning', ...args.slice(1)]);
+}
+
+async function revokeCommand(args) {
+  if (args.length < 2) {
+    console.error('Usage: ai-wot revoke <attestation-event-id> "<reason>"');
+    console.error('\nRevoke a previous attestation you published. Uses NIP-09 deletion.');
+    process.exit(1);
+  }
+
+  const keys = loadKeys();
+  if (!keys) {
+    console.error('❌ No keys found. Set NOSTR_SECRET_KEY env var or place nostr-keys.json in cwd.');
+    process.exit(1);
+  }
+
+  const eventId = args[0];
+  const reason = args[1];
+
+  console.log('🗑️  Publishing revocation...');
+  console.log(`   Revoking event: ${eventId.substring(0, 16)}...`);
+  console.log(`   Reason: "${reason}"`);
+  console.log('');
+
+  const { event, results } = await wot.publishRevocation(keys.secretKey, eventId, reason);
+
+  console.log(`Revocation event ID: ${event.id}\n`);
+
+  for (const r of results) {
+    console.log(`  ${r.relay}: ${r.success ? '✅' : '❌ ' + (r.reason || 'Failed')}`);
+  }
+
+  const successCount = results.filter(r => r.success).length;
+  console.log(`\nPublished to ${successCount}/${results.length} relays`);
+
+  if (successCount > 0) {
+    console.log('\n✅ Attestation revoked. It will be excluded from future trust calculations.');
   }
 }
 
@@ -129,13 +203,22 @@ async function scoreCommand(args) {
   console.log(`  Pubkey:       ${pubkey.substring(0, 16)}...${pubkey.substring(56)}`);
   console.log(`  Trust Score:  ${score.display} / 100`);
   console.log(`  Raw Score:    ${score.raw}`);
-  console.log(`  Attestations: ${score.attestationCount}`);
+  console.log(`  Attestations: ${score.attestationCount} (${score.positiveCount}+ ${score.negativeCount}- ${score.gatedCount}⊘)`);
+  console.log(`  Diversity:    ${score.diversity.diversity} (${score.diversity.uniqueAttesters} unique attesters)`);
+
+  if (score.diversity.maxAttesterShare > 0.5) {
+    console.log(`  ⚠ Trust concentrated: top attester provides ${Math.round(score.diversity.maxAttesterShare * 100)}%`);
+  }
 
   if (score.breakdown.length > 0) {
     console.log('\n  Top contributors:');
-    const sorted = score.breakdown.sort((a, b) => b.contribution - a.contribution).slice(0, 5);
+    const sorted = score.breakdown
+      .filter(b => !b.gated)
+      .sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution))
+      .slice(0, 5);
     for (const b of sorted) {
-      console.log(`    ${b.attester.substring(0, 12)}... → ${b.type} (weight: ${b.contribution}, decay: ${(b.decayFactor * 100).toFixed(0)}%)`);
+      const sign = b.contribution < 0 ? '⚠' : '✓';
+      console.log(`    ${sign} ${b.attester.substring(0, 12)}... → ${b.type} (weight: ${b.contribution}, decay: ${(b.decayFactor * 100).toFixed(0)}%)`);
     }
   }
 }
@@ -156,27 +239,42 @@ function helpCommand() {
   console.log(`
 ╔══════════════════════════════════════════════════════╗
 ║   ai-wot — Web of Trust for AI Agents on Nostr      ║
-║   Version 0.2.0 • Protocol: ai.wot                  ║
+║   Version ${VERSION} • Protocol: ai.wot                  ║
 ╚══════════════════════════════════════════════════════╝
 
 Commands:
 
-  attest <pubkey> <type> "<comment>"
-    Publish an attestation about another agent.
-    Types: service-quality, identity-continuity, general-trust
-    Options: --event <event-id>  Reference a specific event
+  Positive Attestations:
+    attest <pubkey> <type> "<comment>"
+      Publish an attestation about another agent.
+      Types: service-quality, identity-continuity, general-trust
+      Options: --event <event-id>  Reference a specific event
 
-  lookup <pubkey>
-    Show the full trust profile for a pubkey.
+  Negative Attestations:
+    dispute <pubkey> "<reason>"
+      Flag an agent for fraud, scams, or deliberate harm (-1.5x weight).
+      Reason is REQUIRED.
 
-  score <pubkey>
-    Show the calculated trust score for a pubkey.
+    warn <pubkey> "<reason>"
+      Flag an agent for unreliable/sketchy behavior (-0.8x weight).
+      Reason is REQUIRED.
 
-  my-score
-    Show your own trust score.
+  Revocations:
+    revoke <event-id> "<reason>"
+      Revoke a previous attestation you published (NIP-09 deletion).
 
-  help
-    Show this help message.
+  Queries:
+    lookup <pubkey>     Full trust profile with diversity metrics
+    score <pubkey>      Trust score summary
+    my-score            Your own trust score
+
+  Other:
+    help                Show this help message
+
+Negative Attestation Rules:
+  • Only agents with trust ≥ 20 can issue effective negative attestations
+  • Empty-content negative attestations are ignored
+  • This prevents sybil attacks from disposable identities
 
 Environment:
   NOSTR_SECRET_KEY    Hex-encoded 32-byte secret key
@@ -184,6 +282,9 @@ Environment:
 
 Examples:
   ai-wot attest abc123...def service-quality "Great DVM output"
+  ai-wot dispute abc123...def "Sent garbage output after payment"
+  ai-wot warn abc123...def "Service intermittently unavailable"
+  ai-wot revoke evt123...def "Issue was resolved"
   ai-wot score abc123...def
   ai-wot my-score
 `);
@@ -193,6 +294,9 @@ Examples:
 
 const COMMANDS = {
   attest: attestCommand,
+  dispute: disputeCommand,
+  warn: warnCommand,
+  revoke: revokeCommand,
   lookup: lookupCommand,
   score: scoreCommand,
   'my-score': myScoreCommand,
