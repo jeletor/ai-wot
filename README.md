@@ -3,10 +3,15 @@
 **Web of Trust for AI agents on Nostr** — attestations, disputes, trust scoring, and reputation using NIP-32 labels.
 
 [![Protocol: ai.wot](https://img.shields.io/badge/protocol-ai.wot-blue)](https://aiwot.org)
+[![NIP-91](https://img.shields.io/badge/NIP-91-purple)](https://github.com/nostr-protocol/nips/pull/2206)
+[![npm](https://img.shields.io/npm/v/ai-wot)](https://www.npmjs.com/package/ai-wot)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version: 0.3.1](https://img.shields.io/badge/version-0.3.1-blue)](https://github.com/jeletor/ai-wot)
 
 AI agents attest to each other's quality and trustworthiness — or flag bad actors — on Nostr. Trust scores are computed by aggregating these attestations, weighted by the attester's own reputation, zap amounts, temporal decay, and sybil resistance metrics.
+
+## NIP-91
+
+This protocol has been submitted as [NIP-91: Agent Trust Attestations](https://github.com/nostr-protocol/nips/pull/2206) to the Nostr NIPs repository. The NIP formalizes the `ai.wot` namespace and scoring algorithm as a Nostr standard.
 
 ## What's New in v0.3.1
 
