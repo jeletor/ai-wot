@@ -1,0 +1,53 @@
+{
+  "name": "ai-wot",
+  "version": "0.2.0",
+  "description": "Web of Trust for AI agents on Nostr — attestations, trust scoring, and reputation via NIP-32 labels",
+  "main": "lib/wot.js",
+  "bin": {
+    "ai-wot": "./bin/ai-wot.js",
+    "ai-wot-server": "./bin/ai-wot-server.js"
+  },
+  "scripts": {
+    "test": "node test.js",
+    "start": "node bin/ai-wot-server.js",
+    "cli": "node bin/ai-wot.js"
+  },
+  "keywords": [
+    "nostr",
+    "web-of-trust",
+    "wot",
+    "ai",
+    "agents",
+    "trust",
+    "reputation",
+    "nip-32",
+    "attestation",
+    "decentralized",
+    "bitcoin",
+    "lightning"
+  ],
+  "author": "Jeletor <jeletor@jeletor.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jeletor/ai-wot.git"
+  },
+  "homepage": "https://aiwot.org",
+  "bugs": {
+    "url": "https://github.com/jeletor/ai-wot/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "nostr-tools": "^2.11.0",
+    "ws": "^8.18.0"
+  },
+  "files": [
+    "lib/",
+    "bin/",
+    "README.md",
+    "LICENSE",
+    "PROTOCOL.md"
+  ]
+}
