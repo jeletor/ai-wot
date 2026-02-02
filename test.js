@@ -6,13 +6,14 @@
 
 const {
   temporalDecay, zapWeight, calculateTrustScore, calculateDiversity,
+  deduplicateAttestations,
   TYPE_MULTIPLIERS, DEFAULT_HALF_LIFE_DAYS,
   VALID_TYPES, POSITIVE_TYPES, NEGATIVE_TYPES,
   NEGATIVE_ATTESTATION_TRUST_GATE
 } = require('./lib/scoring');
 const { generateBadgeSvg, generateDiversityBadgeSvg } = require('./lib/server');
 const {
-  parseDVMResult, parseDVMFeedback,
+  parseDVMResult, parseDVMFeedback, generateReceiptCandidate,
   DVM_KIND_NAMES, DVM_RESULT_KIND_MIN, DVM_RESULT_KIND_MAX, DVM_FEEDBACK_KIND
 } = require('./lib/receipts');
 
@@ -116,48 +117,48 @@ function mockAttestation(pubkey, type, createdAt, id, content) {
 (async () => {
   const zapEmpty = new Map();
 
-  // Single fresh positive attestation
+  // Single fresh positive attestation (novelty bonus 1.3x applied to first edge)
   const att1 = [mockAttestation('a'.padEnd(64, '0'), 'service-quality', now)];
   const r1 = await calculateTrustScore(att1, zapEmpty, { now });
-  assert(approxEqual(r1.raw, 1.5), 'Single fresh service-quality → raw = 1.5');
-  assert(r1.display === Math.min(100, Math.round(1.5 * 10)), 'Display score correct');
+  assert(approxEqual(r1.raw, 1.95), 'Single fresh service-quality → raw = 1.95 (1.5 × 1.3 novelty)');
+  assert(r1.display === Math.min(100, Math.round(1.95 * 10)), 'Display score correct');
   assert(r1.attestationCount === 1, 'Attestation count = 1');
   assert(r1.positiveCount === 1, 'Positive count = 1');
   assert(r1.negativeCount === 0, 'Negative count = 0');
 
-  // Single attestation with decay
+  // Single attestation with decay (novelty 1.3x still applies)
   const att2 = [mockAttestation('a'.padEnd(64, '0'), 'service-quality', now - 90 * 86400)];
   const r2 = await calculateTrustScore(att2, zapEmpty, { now });
-  assert(approxEqual(r2.raw, 0.75), '90-day-old service-quality → raw = 0.75');
+  assert(approxEqual(r2.raw, 0.98, 0.02), '90-day-old service-quality → raw ≈ 0.98 (0.75 × 1.3)');
 
-  // Multiple positive attestations
+  // Multiple positive attestations (all novel edges → 1.3x each)
   const att3 = [
     mockAttestation('a'.padEnd(64, '0'), 'service-quality', now, 'evt1'),
     mockAttestation('b'.padEnd(64, '0'), 'general-trust', now, 'evt2'),
     mockAttestation('c'.padEnd(64, '0'), 'identity-continuity', now - 90 * 86400, 'evt3')
   ];
   const r3 = await calculateTrustScore(att3, zapEmpty, { now });
-  assert(approxEqual(r3.raw, 2.8), 'Mixed types and ages → raw = 2.8');
+  assert(approxEqual(r3.raw, 3.64), 'Mixed types and ages → raw = 3.64 (2.8 × 1.3 novelty)');
   assert(r3.attestationCount === 3, '3 attestations counted');
 
-  // Work-completed attestation
+  // Work-completed attestation (novel → 1.3x)
   const attWc = [mockAttestation('a'.padEnd(64, '0'), 'work-completed', now)];
   const rWc = await calculateTrustScore(attWc, zapEmpty, { now });
-  assert(approxEqual(rWc.raw, 1.2), 'Single fresh work-completed → raw = 1.2');
+  assert(approxEqual(rWc.raw, 1.56), 'Single fresh work-completed → raw = 1.56 (1.2 × 1.3)');
   assert(rWc.positiveCount === 1, 'work-completed counts as positive');
 
-  // Work-completed with service-quality (both about same provider)
+  // Work-completed with service-quality (both about same provider, both novel from same attester)
   const attWcSq = [
     mockAttestation('a'.padEnd(64, '0'), 'work-completed', now, 'wc1'),
     mockAttestation('a'.padEnd(64, '0'), 'service-quality', now, 'sq1')
   ];
   const rWcSq = await calculateTrustScore(attWcSq, zapEmpty, { now });
-  assert(approxEqual(rWcSq.raw, 2.7), 'work-completed + service-quality → raw = 2.7 (1.2 + 1.5)');
+  assert(approxEqual(rWcSq.raw, 3.51), 'work-completed + service-quality → raw = 3.51 ((1.2 + 1.5) × 1.3)');
 
-  // Work-completed with decay
+  // Work-completed with decay (novel → 1.3x)
   const attWcOld = [mockAttestation('a'.padEnd(64, '0'), 'work-completed', now - 90 * 86400)];
   const rWcOld = await calculateTrustScore(attWcOld, zapEmpty, { now });
-  assert(approxEqual(rWcOld.raw, 0.6), '90-day-old work-completed → raw = 0.6 (1.2 × 0.5)');
+  assert(approxEqual(rWcOld.raw, 0.78), '90-day-old work-completed → raw = 0.78 (1.2 × 0.5 × 1.3)');
 
   // Attestation with zaps
   const att4 = [mockAttestation('a'.padEnd(64, '0'), 'service-quality', now, 'zapped_evt')];
@@ -195,14 +196,14 @@ function mockAttestation(pubkey, type, createdAt, id, content) {
   assert(rMixed.positiveCount === 1, 'Mixed: 1 positive');
   assert(rMixed.negativeCount === 1, 'Mixed: 1 negative');
 
-  // Positive outweighs negative
+  // Positive outweighs negative (all novel → 1.3x each)
   const morePositive = [
-    mockAttestation('a'.padEnd(64, '0'), 'service-quality', now, 'p1'),   // +1.5
-    mockAttestation('b'.padEnd(64, '0'), 'service-quality', now, 'p2'),   // +1.5
-    mockAttestation('c'.padEnd(64, '0'), 'warning', now, 'w1', 'Sketchy') // -0.8
+    mockAttestation('a'.padEnd(64, '0'), 'service-quality', now, 'p1'),   // +1.5 × 1.3
+    mockAttestation('b'.padEnd(64, '0'), 'service-quality', now, 'p2'),   // +1.5 × 1.3
+    mockAttestation('c'.padEnd(64, '0'), 'warning', now, 'w1', 'Sketchy') // -0.8 × 1.3
   ];
   const rMorePos = await calculateTrustScore(morePositive, zapEmpty, { now, negativeTrustGate: 0 });
-  assert(approxEqual(rMorePos.raw, 2.2), '2 service-quality + 1 warning → raw = 2.2');
+  assert(approxEqual(rMorePos.raw, 2.86), '2 service-quality + 1 warning → raw = 2.86 (2.2 × 1.3)');
 
   // Warning has lighter weight than dispute
   const warnAtt = [mockAttestation('a'.padEnd(64, '0'), 'warning', now, 'w1', 'Unreliable')];
@@ -346,7 +347,7 @@ function mockAttestation(pubkey, type, createdAt, id, content) {
   }];
   const rMalformed = await calculateTrustScore(malformedAtt, zapEmpty, { now });
   assert(rMalformed.positiveCount === 1, 'Malformed tags → still counted (lenient parsing)');
-  assert(rMalformed.raw === 1.5, 'Malformed service-quality → raw = 1.5');
+  assert(approxEqual(rMalformed.raw, 1.95), 'Malformed service-quality → raw = 1.95 (1.5 × 1.3 novelty)');
 
   // Well-formed attestation still works
   const wellFormedAtt = [mockAttestation('b'.padEnd(64, '0'), 'service-quality', now)];
@@ -582,6 +583,169 @@ function mockAttestation(pubkey, type, createdAt, id, content) {
 
   const commentNoAmount = buildReceiptComment({ ...dvmResult1, amountSats: null });
   assert(commentNoAmount === 'DVM receipt | kind:5050 (text-generation)', 'Receipt comment without amount');
+
+  // ─── Deduplication Tests (v0.6.0) ──────────────────────────────
+
+  console.log('\n🔄 Deduplication');
+
+  // deduplicateAttestations keeps most recent from same (attester, subject, type)
+  const dedupAtts = [
+    mockAttestation('a'.padEnd(64, '0'), 'service-quality', now - 100, 'old1'),
+    mockAttestation('a'.padEnd(64, '0'), 'service-quality', now - 50, 'mid1'),
+    mockAttestation('a'.padEnd(64, '0'), 'service-quality', now, 'new1'),
+  ];
+  const deduped = deduplicateAttestations(dedupAtts);
+  assert(deduped.length === 1, 'Dedup: 3 same-attester attestations → 1');
+  assert(deduped[0].id === 'new1', 'Dedup: keeps most recent (new1)');
+
+  // Different attesters are kept
+  const dedupDiff = [
+    mockAttestation('a'.padEnd(64, '0'), 'service-quality', now, 'da1'),
+    mockAttestation('b'.padEnd(64, '0'), 'service-quality', now, 'db1'),
+  ];
+  const dedupedDiff = deduplicateAttestations(dedupDiff);
+  assert(dedupedDiff.length === 2, 'Dedup: different attesters → both kept');
+
+  // Different types from same attester are kept
+  const dedupTypes = [
+    mockAttestation('a'.padEnd(64, '0'), 'service-quality', now, 'dt1'),
+    mockAttestation('a'.padEnd(64, '0'), 'general-trust', now, 'dt2'),
+  ];
+  const dedupedTypes = deduplicateAttestations(dedupTypes);
+  assert(dedupedTypes.length === 2, 'Dedup: different types from same attester → both kept');
+
+  // Empty input
+  const dedupEmpty = deduplicateAttestations([]);
+  assert(dedupEmpty.length === 0, 'Dedup: empty input → empty output');
+
+  // calculateTrustScore with deduplication keeps most recent
+  const dedupScoreAtts = [
+    mockAttestation('a'.padEnd(64, '0'), 'service-quality', now - 200, 'ds_old'),  // old, will be deduped
+    mockAttestation('a'.padEnd(64, '0'), 'service-quality', now, 'ds_new'),         // most recent, kept
+  ];
+  const rDedupScore = await calculateTrustScore(dedupScoreAtts, zapEmpty, { now, deduplicate: true });
+  // After dedup, only 1 attestation remains. It's "novel" because it IS the earliest (since old one is removed).
+  // service-quality × 1.0 decay × 1.3 novelty = 1.5 × 1.3 = 1.95
+  assert(rDedupScore.breakdown.length === 1, 'Dedup score: only 1 breakdown entry after dedup');
+  assert(rDedupScore.breakdown[0].eventId === 'ds_new', 'Dedup score: most recent kept');
+
+  // With dedup disabled, both are scored
+  const rNoDedupScore = await calculateTrustScore(dedupScoreAtts, zapEmpty, { now, deduplicate: false, noveltyMultiplier: 1.0 });
+  assert(rNoDedupScore.breakdown.length === 2, 'No dedup: both attestations scored');
+
+  // ─── Novelty Bonus Tests (v0.6.0) ────────────────────────────
+
+  console.log('\n✨ Novelty Bonus');
+
+  // First-time edge gets novelty bonus
+  const novelAtt = [mockAttestation('a'.padEnd(64, '0'), 'service-quality', now, 'novel1')];
+  const rNovel = await calculateTrustScore(novelAtt, zapEmpty, { now, deduplicate: false });
+  // service-quality = 1.5, novelty = 1.3x → 1.95
+  assert(approxEqual(rNovel.raw, 1.95), 'Novel edge: service-quality × 1.3 = 1.95');
+  assert(rNovel.breakdown[0].noveltyBonus === true, 'Novel edge: noveltyBonus = true');
+
+  // Re-attestation does NOT get novelty bonus (has earlier attestation from same attester to same subject)
+  const reattestAtts = [
+    mockAttestation('a'.padEnd(64, '0'), 'service-quality', now - 100, 'first1'),
+    mockAttestation('a'.padEnd(64, '0'), 'service-quality', now, 'second1'),
+  ];
+  // With dedup OFF so both are scored; only the first one is novel
+  const rReattest = await calculateTrustScore(reattestAtts, zapEmpty, { now, deduplicate: false });
+  const firstEntry = rReattest.breakdown.find(b => b.eventId === 'first1');
+  const secondEntry = rReattest.breakdown.find(b => b.eventId === 'second1');
+  assert(firstEntry.noveltyBonus === true, 'First attestation in pair: noveltyBonus = true');
+  assert(secondEntry.noveltyBonus === false, 'Re-attestation: noveltyBonus = false');
+
+  // Verify contribution difference: first has 1.3x, second does not
+  // first1: service-quality(1.5) × decay × 1.3 (novel)
+  // second1: service-quality(1.5) × 1.0 decay × 1.0 (not novel)
+  assert(approxEqual(secondEntry.contribution, 1.5), 'Re-attestation: contribution = 1.5 (no novelty)');
+  assert(firstEntry.contribution > secondEntry.contribution * 0.5, 'First attestation has novelty boost (despite decay)');
+
+  // Custom novelty multiplier
+  const rCustomNovelty = await calculateTrustScore(novelAtt, zapEmpty, { now, deduplicate: false, noveltyMultiplier: 2.0 });
+  assert(approxEqual(rCustomNovelty.raw, 3.0), 'Custom novelty multiplier 2.0: 1.5 × 2.0 = 3.0');
+
+  // Novelty multiplier 1.0 disables bonus
+  const rNoNovelty = await calculateTrustScore(novelAtt, zapEmpty, { now, deduplicate: false, noveltyMultiplier: 1.0 });
+  assert(approxEqual(rNoNovelty.raw, 1.5), 'Novelty multiplier 1.0: no bonus applied');
+
+  // Different attesters to same subject both get novelty
+  const twoNovelAtts = [
+    mockAttestation('a'.padEnd(64, '0'), 'service-quality', now, 'tn1'),
+    mockAttestation('b'.padEnd(64, '0'), 'service-quality', now, 'tn2'),
+  ];
+  const rTwoNovel = await calculateTrustScore(twoNovelAtts, zapEmpty, { now, deduplicate: false });
+  assert(rTwoNovel.breakdown[0].noveltyBonus === true, 'Two novel attesters: first is novel');
+  assert(rTwoNovel.breakdown[1].noveltyBonus === true, 'Two novel attesters: second is novel');
+
+  // ─── Receipt Candidate Tests (v0.6.0) ─────────────────────────
+
+  console.log('\n📋 Receipt Candidate');
+
+  const candidateDvmResult = {
+    resultEventId: 'result_candidate'.padEnd(64, '0'),
+    resultKind: 6050,
+    requestKind: 5050,
+    requestKindName: 'text-generation',
+    requestEventId: 'request_candidate'.padEnd(64, '0'),
+    dvmPubkey: 'dvm_candidate'.padEnd(64, 'a'),
+    requesterPubkey: 'requester_candidate'.padEnd(64, 'b'),
+    content: 'test result',
+    createdAt: now,
+    amountMillisats: 42000,
+    amountSats: 42
+  };
+
+  const candidate = generateReceiptCandidate(candidateDvmResult, { comment: 'Great work', rating: 4 });
+  assert(candidate.type === 'service-quality', 'Candidate: default type = service-quality');
+  assert(candidate.targetPubkey === 'dvm_candidate'.padEnd(64, 'a'), 'Candidate: targetPubkey correct');
+  assert(candidate.eventRef === 'result_candidate'.padEnd(64, '0'), 'Candidate: eventRef correct');
+  assert(candidate.amountSats === 42, 'Candidate: amountSats = 42');
+  assert(candidate.rating === 4, 'Candidate: rating = 4');
+  assert(candidate.comment.includes('DVM receipt'), 'Candidate: comment has DVM receipt prefix');
+  assert(candidate.comment.includes('42 sats'), 'Candidate: comment includes sats');
+  assert(candidate.comment.includes('rating:4/5'), 'Candidate: comment includes rating');
+  assert(candidate.comment.includes('Great work'), 'Candidate: comment includes user comment');
+  assert(candidate.comment.includes('text-generation'), 'Candidate: comment includes kind name');
+  assert(Array.isArray(candidate.tags), 'Candidate: tags is array');
+  assert(candidate.tags.length === 4, 'Candidate: 4 tags (L, l, p, e)');
+  assert(candidate.dvmResult.dvmPubkey === candidateDvmResult.dvmPubkey, 'Candidate: dvmResult.dvmPubkey preserved');
+  assert(candidate.dvmResult.requestKind === 5050, 'Candidate: dvmResult.requestKind preserved');
+
+  // Candidate without optional fields
+  const minCandidate = generateReceiptCandidate(candidateDvmResult);
+  assert(minCandidate.rating === null, 'Minimal candidate: rating = null');
+  assert(minCandidate.type === 'service-quality', 'Minimal candidate: type = service-quality');
+  assert(minCandidate.comment === 'DVM receipt | kind:5050 (text-generation) | 42 sats', 'Minimal candidate: auto-built comment');
+
+  // Candidate with custom type
+  const customTypeCandidate = generateReceiptCandidate(candidateDvmResult, { type: 'general-trust' });
+  assert(customTypeCandidate.type === 'general-trust', 'Custom type candidate: type = general-trust');
+
+  // Candidate rejects missing dvmPubkey
+  let candidateError = false;
+  try { generateReceiptCandidate({}); } catch (e) { candidateError = true; }
+  assert(candidateError, 'Candidate: throws on missing dvmPubkey');
+
+  // Candidate rejects missing resultEventId
+  let candidateError2 = false;
+  try { generateReceiptCandidate({ dvmPubkey: 'x'.padEnd(64, '0') }); } catch (e) { candidateError2 = true; }
+  assert(candidateError2, 'Candidate: throws on missing resultEventId');
+
+  // ─── reaffirmAttestation Structure Tests (v0.6.0) ─────────────
+
+  console.log('\n🔁 reaffirmAttestation Structure');
+
+  // We can't call reaffirmAttestation directly (it publishes to relays),
+  // but we can verify the module exports it and test the logic indirectly
+  const wotModule = require('./lib/wot');
+  assert(typeof wotModule.reaffirmAttestation === 'function', 'reaffirmAttestation is exported');
+  assert(typeof wotModule.queryLatestAttestations === 'function', 'queryLatestAttestations is exported');
+  assert(typeof wotModule.generateReceiptCandidate === 'function', 'generateReceiptCandidate is exported from wot');
+
+  // Verify VERSION updated
+  assert(wotModule.VERSION === '0.6.0', 'VERSION = 0.6.0');
 
   // ─── Summary ──────────────────────────────────────────────────
 
