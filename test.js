@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// ai-wot — Test Suite v0.4.0
+// ai-wot — Test Suite v0.5.0
 // Tests: temporal decay, type multipliers, zap weights, normalization,
 //        negative attestations, trust gating, diversity scoring, revocations, badges,
 //        DVM receipts, batch attestations
@@ -74,6 +74,7 @@ assert(zapWeight(-10) === 1.0, 'Negative sats → base weight');
 console.log('\n🏷️  Type Multipliers');
 
 assert(TYPE_MULTIPLIERS['service-quality'] === 1.5, 'service-quality = 1.5x');
+assert(TYPE_MULTIPLIERS['work-completed'] === 1.2, 'work-completed = 1.2x');
 assert(TYPE_MULTIPLIERS['identity-continuity'] === 1.0, 'identity-continuity = 1.0x');
 assert(TYPE_MULTIPLIERS['general-trust'] === 0.8, 'general-trust = 0.8x');
 assert(TYPE_MULTIPLIERS['dispute'] === -1.5, 'dispute = -1.5x');
@@ -83,13 +84,15 @@ assert(TYPE_MULTIPLIERS['warning'] === -0.8, 'warning = -0.8x');
 
 console.log('\n📋 Type Classification');
 
-assert(VALID_TYPES.length === 5, '5 valid attestation types');
-assert(POSITIVE_TYPES.length === 3, '3 positive types');
+assert(VALID_TYPES.length === 6, '6 valid attestation types');
+assert(POSITIVE_TYPES.length === 4, '4 positive types');
 assert(NEGATIVE_TYPES.length === 2, '2 negative types');
 assert(POSITIVE_TYPES.includes('service-quality'), 'service-quality is positive');
+assert(POSITIVE_TYPES.includes('work-completed'), 'work-completed is positive');
 assert(NEGATIVE_TYPES.includes('dispute'), 'dispute is negative');
 assert(NEGATIVE_TYPES.includes('warning'), 'warning is negative');
 assert(!NEGATIVE_TYPES.includes('general-trust'), 'general-trust is NOT negative');
+assert(!NEGATIVE_TYPES.includes('work-completed'), 'work-completed is NOT negative');
 assert(NEGATIVE_ATTESTATION_TRUST_GATE === 20, 'Trust gate threshold = 20');
 
 // ─── Score Calculation Tests ────────────────────────────────────
@@ -136,6 +139,25 @@ function mockAttestation(pubkey, type, createdAt, id, content) {
   const r3 = await calculateTrustScore(att3, zapEmpty, { now });
   assert(approxEqual(r3.raw, 2.8), 'Mixed types and ages → raw = 2.8');
   assert(r3.attestationCount === 3, '3 attestations counted');
+
+  // Work-completed attestation
+  const attWc = [mockAttestation('a'.padEnd(64, '0'), 'work-completed', now)];
+  const rWc = await calculateTrustScore(attWc, zapEmpty, { now });
+  assert(approxEqual(rWc.raw, 1.2), 'Single fresh work-completed → raw = 1.2');
+  assert(rWc.positiveCount === 1, 'work-completed counts as positive');
+
+  // Work-completed with service-quality (both about same provider)
+  const attWcSq = [
+    mockAttestation('a'.padEnd(64, '0'), 'work-completed', now, 'wc1'),
+    mockAttestation('a'.padEnd(64, '0'), 'service-quality', now, 'sq1')
+  ];
+  const rWcSq = await calculateTrustScore(attWcSq, zapEmpty, { now });
+  assert(approxEqual(rWcSq.raw, 2.7), 'work-completed + service-quality → raw = 2.7 (1.2 + 1.5)');
+
+  // Work-completed with decay
+  const attWcOld = [mockAttestation('a'.padEnd(64, '0'), 'work-completed', now - 90 * 86400)];
+  const rWcOld = await calculateTrustScore(attWcOld, zapEmpty, { now });
+  assert(approxEqual(rWcOld.raw, 0.6), '90-day-old work-completed → raw = 0.6 (1.2 × 0.5)');
 
   // Attestation with zaps
   const att4 = [mockAttestation('a'.padEnd(64, '0'), 'service-quality', now, 'zapped_evt')];

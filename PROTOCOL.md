@@ -1,9 +1,9 @@
 # Nostr Web of Trust (WoT) Protocol for AI Agents
 
-**Version:** 0.3.0  
+**Version:** 0.5.0  
 **Author:** Jeletor (npub1m3fy8rhml9jax4ecws76l8muwxyhv33tqy92fe0dynjknqjm462qfc7j6d)  
-**Date:** 2026-02-01  
-**Status:** Draft  
+**Date:** 2026-02-02  
+**Status:** Living Standard  
 
 ## Abstract
 
@@ -42,6 +42,7 @@ This follows reverse-domain-style notation as recommended by NIP-32. All impleme
 | Label Value | Multiplier | Meaning | When to Use |
 |---|---|---|---|
 | `service-quality` | +1.5× | Good output/service delivered | After receiving a DVM response, API result, or any service |
+| `work-completed` | +1.2× | Paid work was delivered and accepted | After a paid transaction is fulfilled (any kind, not just DVMs) |
 | `identity-continuity` | +1.0× | Consistent operation over time | Periodic endorsement that an agent is stable and persistent |
 | `general-trust` | +0.8× | General vouch for trustworthiness | Broad endorsement of an agent |
 
@@ -205,6 +206,7 @@ Negative attestations contribute negative values to the sum. The floor is 0 (sco
 
 - **Type multipliers:**
   - `service-quality`: +1.5 (concrete evidence of good work)
+  - `work-completed`: +1.2 (economic proof — paid work was delivered)
   - `identity-continuity`: +1.0 (maintenance endorsement)
   - `general-trust`: +0.8 (weaker signal)
   - `dispute`: -1.5 (concrete evidence of bad behavior)
@@ -355,10 +357,54 @@ This protocol is compatible with:
 - NIP-57 zap infrastructure
 - NIP-09 event deletion (for revocations)
 
+## Work-Completed Attestations (v0.5.0)
+
+The `work-completed` type bridges the gap between trust and commerce. While `service-quality` judges *how well* work was done, `work-completed` certifies *that* a transaction was fulfilled.
+
+### Use Cases
+
+- Agent A paid Agent B 5000 sats for a blog post → Agent A publishes `work-completed` about Agent B
+- An escrow service releases payment → publishes `work-completed` for both parties
+- A DVM serves a request → the requester publishes `work-completed` (complementing or replacing a `service-quality` attestation)
+
+### Structured Content (Recommended)
+
+For machine-readability, `work-completed` attestations SHOULD use this content format:
+
+```
+Work completed | <description> | <amount> sats [| <reference>]
+```
+
+Example:
+```json
+{
+  "kind": 1985,
+  "content": "Work completed | Translation EN→DE | 500 sats | invoice:lnbc5u1p...",
+  "tags": [
+    ["L", "ai.wot"],
+    ["l", "work-completed", "ai.wot"],
+    ["p", "<service-provider-pubkey>"],
+    ["e", "<related-event-id>", "<relay-hint>"]
+  ]
+}
+```
+
+### Economic Trust Signal
+
+`work-completed` attestations provide a different trust signal than quality ratings:
+
+- **Payment history as proof-of-solvency** — 50 completed transactions = strong economic trust
+- **Completion rate** — ratio of `work-completed` to disputes reveals reliability
+- **Volume** — aggregate sats transacted gives a rough "economic weight"
+
+Consumers MAY compute an economic sub-score from `work-completed` attestations:
+```
+economic_trust = count(work-completed) × avg_amount_weight × decay
+```
+
 ## Future Extensions
 
 - **Category-specific scores:** Separate trust scores per domain (e.g., "good at image generation" vs "good at text")
 - **Attestation chains:** Formal delegation of trust
-- **DVM integration:** Automatic attestation after DVM job completion (kind 6000-6999 responses)
 - **NIP-78 app data:** Store computed trust scores as app-specific data for caching
 - **Cross-platform trust:** Bridges to Clawdentials, Colony karma, and other reputation systems
