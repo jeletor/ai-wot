@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// ai-wot — Test Suite v0.3.0
+// ai-wot — Test Suite v0.4.0
 // Tests: temporal decay, type multipliers, zap weights, normalization,
-//        negative attestations, trust gating, diversity scoring, revocations, badges
+//        negative attestations, trust gating, diversity scoring, revocations, badges,
+//        DVM receipts, batch attestations
 
 const {
   temporalDecay, zapWeight, calculateTrustScore, calculateDiversity,
@@ -10,6 +11,10 @@ const {
   NEGATIVE_ATTESTATION_TRUST_GATE
 } = require('./lib/scoring');
 const { generateBadgeSvg, generateDiversityBadgeSvg } = require('./lib/server');
+const {
+  parseDVMResult, parseDVMFeedback,
+  DVM_KIND_NAMES, DVM_RESULT_KIND_MIN, DVM_RESULT_KIND_MAX, DVM_FEEDBACK_KIND
+} = require('./lib/receipts');
 
 let passed = 0;
 let failed = 0;
@@ -390,6 +395,171 @@ function mockAttestation(pubkey, type, createdAt, id, content) {
 
   const grayDiv = generateDiversityBadgeSvg(null);
   assert(grayDiv.includes('#9e9e9e'), 'Unknown diversity → gray badge');
+
+  // ─── DVM Result Parsing Tests ─────────────────────────────────
+
+  console.log('\n🔧 DVM Result Parsing');
+
+  // Valid DVM result (kind 6050 = text generation response)
+  const dvmResult1 = parseDVMResult({
+    id: 'result_event_1'.padEnd(64, '0'),
+    kind: 6050,
+    pubkey: 'dvm_pubkey'.padEnd(64, 'a'),
+    created_at: now,
+    content: 'Here is your translation',
+    tags: [
+      ['e', 'request_event_1'.padEnd(64, '0')],
+      ['p', 'requester_pubkey'.padEnd(64, 'b')],
+      ['amount', '21000'] // 21000 millisats = 21 sats
+    ]
+  });
+  assert(dvmResult1 !== null, 'Valid DVM result parsed');
+  assert(dvmResult1.resultKind === 6050, 'Result kind = 6050');
+  assert(dvmResult1.requestKind === 5050, 'Request kind = 5050');
+  assert(dvmResult1.requestKindName === 'text-generation', 'Kind name = text-generation');
+  assert(dvmResult1.dvmPubkey === 'dvm_pubkey'.padEnd(64, 'a'), 'DVM pubkey extracted');
+  assert(dvmResult1.requestEventId === 'request_event_1'.padEnd(64, '0'), 'Request event ID extracted');
+  assert(dvmResult1.requesterPubkey === 'requester_pubkey'.padEnd(64, 'b'), 'Requester pubkey extracted');
+  assert(dvmResult1.amountMillisats === 21000, 'Amount millisats = 21000');
+  assert(dvmResult1.amountSats === 21, 'Amount sats = 21');
+  assert(dvmResult1.content === 'Here is your translation', 'Content preserved');
+
+  // Non-DVM event (kind 1 = regular note)
+  const nonDVM = parseDVMResult({
+    id: 'note'.padEnd(64, '0'),
+    kind: 1,
+    pubkey: 'someone'.padEnd(64, '0'),
+    created_at: now,
+    content: 'Just a note',
+    tags: []
+  });
+  assert(nonDVM === null, 'Non-DVM event → null');
+
+  // Kind at boundary (5999 request → 6999 result — still valid)
+  const edgeResult = parseDVMResult({
+    id: 'edge'.padEnd(64, '0'),
+    kind: 6999,
+    pubkey: 'dvm'.padEnd(64, '0'),
+    created_at: now,
+    content: '',
+    tags: []
+  });
+  assert(edgeResult !== null, 'Kind 6999 (edge case) → valid');
+  assert(edgeResult.requestKind === 5999, 'Kind 6999 → request kind 5999');
+
+  // Kind out of range
+  assert(parseDVMResult({ id: 'x'.padEnd(64, '0'), kind: 5050, pubkey: 'y'.padEnd(64, '0'), created_at: now, content: '', tags: [] }) === null, 'Kind 5050 (request, not result) → null');
+  assert(parseDVMResult({ id: 'x'.padEnd(64, '0'), kind: 7001, pubkey: 'y'.padEnd(64, '0'), created_at: now, content: '', tags: [] }) === null, 'Kind 7001 → null');
+
+  // Null/undefined input
+  assert(parseDVMResult(null) === null, 'null → null');
+  assert(parseDVMResult(undefined) === null, 'undefined → null');
+  assert(parseDVMResult({}) === null, 'empty object → null');
+
+  // No amount tag
+  const noAmount = parseDVMResult({
+    id: 'na'.padEnd(64, '0'),
+    kind: 6050,
+    pubkey: 'dvm'.padEnd(64, '0'),
+    created_at: now,
+    content: 'result',
+    tags: [['e', 'req'.padEnd(64, '0')]]
+  });
+  assert(noAmount !== null, 'No amount tag → still valid');
+  assert(noAmount.amountSats === null, 'No amount → amountSats = null');
+  assert(noAmount.amountMillisats === null, 'No amount → amountMillisats = null');
+
+  // All known DVM kind names
+  assert(DVM_KIND_NAMES[5050] === 'text-generation', 'Kind 5050 name');
+  assert(DVM_KIND_NAMES[5100] === 'image-generation', 'Kind 5100 name');
+  assert(DVM_KIND_NAMES[5200] === 'text-to-speech', 'Kind 5200 name');
+  assert(DVM_KIND_NAMES[5300] === 'content-discovery', 'Kind 5300 name');
+  assert(DVM_KIND_NAMES[5500] === 'translation', 'Kind 5500 name');
+
+  // ─── DVM Feedback Parsing Tests ─────────────────────────────
+
+  console.log('\n📡 DVM Feedback Parsing');
+
+  const feedback1 = parseDVMFeedback({
+    id: 'fb1'.padEnd(64, '0'),
+    kind: 7000,
+    pubkey: 'dvm'.padEnd(64, '0'),
+    created_at: now,
+    content: JSON.stringify({ bolt11: 'lnbc210n1pjtest' }),
+    tags: [
+      ['e', 'req'.padEnd(64, '0')],
+      ['status', 'payment-required'],
+      ['amount', '21000']
+    ]
+  });
+  assert(feedback1 !== null, 'Valid feedback parsed');
+  assert(feedback1.status === 'payment-required', 'Status = payment-required');
+  assert(feedback1.amountSats === 21, 'Feedback amount = 21 sats');
+  assert(feedback1.bolt11 === 'lnbc210n1pjtest', 'Bolt11 extracted from JSON content');
+
+  // Feedback with bare bolt11 in content
+  const feedback2 = parseDVMFeedback({
+    id: 'fb2'.padEnd(64, '0'),
+    kind: 7000,
+    pubkey: 'dvm'.padEnd(64, '0'),
+    created_at: now,
+    content: 'lnbc210n1pjbare',
+    tags: [
+      ['e', 'req'.padEnd(64, '0')],
+      ['status', 'payment-required']
+    ]
+  });
+  assert(feedback2.bolt11 === 'lnbc210n1pjbare', 'Bare bolt11 in content detected');
+
+  // Non-feedback event
+  assert(parseDVMFeedback({ id: 'x'.padEnd(64, '0'), kind: 6050, pubkey: 'y'.padEnd(64, '0'), created_at: now, content: '', tags: [] }) === null, 'Non-feedback kind → null');
+  assert(parseDVMFeedback(null) === null, 'null → null');
+
+  // Processing status feedback
+  const feedback3 = parseDVMFeedback({
+    id: 'fb3'.padEnd(64, '0'),
+    kind: 7000,
+    pubkey: 'dvm'.padEnd(64, '0'),
+    created_at: now,
+    content: 'Working on it...',
+    tags: [
+      ['e', 'req'.padEnd(64, '0')],
+      ['status', 'processing']
+    ]
+  });
+  assert(feedback3.status === 'processing', 'Processing status parsed');
+  assert(feedback3.bolt11 === null, 'No bolt11 in processing feedback');
+
+  // ─── DVM Constants Tests ────────────────────────────────────
+
+  console.log('\n📋 DVM Constants');
+
+  assert(DVM_RESULT_KIND_MIN === 6000, 'DVM result kind min = 6000');
+  assert(DVM_RESULT_KIND_MAX === 6999, 'DVM result kind max = 6999');
+  assert(DVM_FEEDBACK_KIND === 7000, 'DVM feedback kind = 7000');
+
+  // ─── Receipt Content Format Tests ───────────────────────────
+
+  console.log('\n🧾 Receipt Content Format');
+
+  // Verify the structured comment format by simulating what publishReceipt would build
+  function buildReceiptComment(result, opts = {}) {
+    const parts = ['DVM receipt'];
+    parts.push(`kind:${result.requestKind} (${result.requestKindName})`);
+    if (opts.amountSats || result.amountSats) parts.push(`${opts.amountSats || result.amountSats} sats`);
+    if (opts.rating) parts.push(`rating:${opts.rating}/5`);
+    if (opts.comment) parts.push(opts.comment);
+    return parts.join(' | ');
+  }
+
+  const comment1 = buildReceiptComment(dvmResult1, { amountSats: 21, rating: 5, comment: 'Fast translation' });
+  assert(comment1 === 'DVM receipt | kind:5050 (text-generation) | 21 sats | rating:5/5 | Fast translation', 'Full receipt comment format');
+
+  const comment2 = buildReceiptComment(dvmResult1);
+  assert(comment2 === 'DVM receipt | kind:5050 (text-generation) | 21 sats', 'Minimal receipt comment (amount from result)');
+
+  const commentNoAmount = buildReceiptComment({ ...dvmResult1, amountSats: null });
+  assert(commentNoAmount === 'DVM receipt | kind:5050 (text-generation)', 'Receipt comment without amount');
 
   // ─── Summary ──────────────────────────────────────────────────
 

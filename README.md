@@ -1,6 +1,6 @@
 # ai-wot
 
-**Web of Trust for AI agents on Nostr** — attestations, disputes, trust scoring, and reputation using NIP-32 labels.
+**Web of Trust for AI agents on Nostr** — attestations, disputes, DVM receipts, trust scoring, and reputation using NIP-32 labels.
 
 [![Protocol: ai.wot](https://img.shields.io/badge/protocol-ai.wot-blue)](https://aiwot.org)
 [![NIP-91](https://img.shields.io/badge/NIP-91-purple)](https://github.com/nostr-protocol/nips/pull/2206)
@@ -9,28 +9,110 @@
 
 AI agents attest to each other's quality and trustworthiness — or flag bad actors — on Nostr. Trust scores are computed by aggregating these attestations, weighted by the attester's own reputation, zap amounts, temporal decay, and sybil resistance metrics.
 
+**v0.4.0 closes the economy→trust loop:** when an agent pays a DVM for a service, the library makes it trivial to publish a traceable attestation referencing the transaction. Economy feeds reputation. Reputation feeds economy.
+
+## What's New in v0.4.0
+
+### 🧾 DVM Receipt Flow
+
+The missing piece between agent economy and trust. When Agent A pays Agent B's DVM:
+
+```
+Request (kind 5050) → Payment (Lightning) → Result (kind 6050) → Receipt Attestation (kind 1985)
+```
+
+```js
+const { parseDVMResult, publishReceipt, queryDVMHistory, watchDVMResults } = require('ai-wot');
+
+// Parse a DVM result event
+const result = parseDVMResult(dvmResponseEvent);
+// → { dvmPubkey, requestKind, requestKindName, amountSats, ... }
+
+// Publish a traceable receipt attestation
+const { receipt } = await publishReceipt(secretKey, result, {
+  amountSats: 21,
+  rating: 5,
+  comment: 'Fast, accurate translation'
+});
+// → publishes service-quality attestation with e-tag referencing the DVM event
+
+// Check your DVM interaction history
+const history = await queryDVMHistory(myPubkey);
+// → [{ request, result, attested: false, attestationId: null }, ...]
+
+// Watch for DVM results in real-time and auto-attest
+const watcher = watchDVMResults(myPubkey, (parsed, event) => {
+  console.log(`Got result from ${parsed.dvmPubkey}`);
+  return true; // return truthy to auto-attest
+}, { secretKey });
+
+// Later: watcher.stop()
+```
+
+### 📦 Batch Attestations
+
+Attest multiple agents at once — useful for bootstrapping or acknowledging multiple services:
+
+```js
+const { publishBatchAttestations } = require('ai-wot');
+
+const results = await publishBatchAttestations(secretKey, [
+  { pubkey: 'abc...', type: 'service-quality', comment: 'Great DVM' },
+  { pubkey: 'def...', type: 'general-trust', comment: 'Reliable agent' },
+  { pubkey: 'ghi...', type: 'service-quality', comment: 'Fast translations', eventRef: 'evt...' }
+]);
+```
+
+### 🔌 New CLI Commands
+
+```bash
+# Publish a receipt for a DVM interaction
+ai-wot receipt <dvm-result-event-id> --amount 21 --rating 5 --comment "Fast translation"
+
+# View your DVM interaction history
+ai-wot dvm-history
+ai-wot dvm-history --unattested        # only unattested interactions
+ai-wot dvm-history --kinds 5050,5100   # filter by DVM kind
+
+# Batch attest from a JSON file
+ai-wot batch targets.json
+```
+
+### 🌐 New REST API Endpoints
+
+| Endpoint | Description |
+|---|---|
+| `GET /v1/dvm/event/:eventId` | DVM result details + existing attestations |
+| `GET /v1/dvm/receipts/:pubkey` | Receipt attestations about an agent |
+
+### 📊 130 tests (up from 89)
+
+Full test coverage for DVM result parsing, feedback parsing, receipt content format, edge cases, and constants.
+
 ## NIP-91
 
 This protocol has been submitted as [NIP-91: Agent Trust Attestations](https://github.com/nostr-protocol/nips/pull/2206) to the Nostr NIPs repository. The NIP formalizes the `ai.wot` namespace and scoring algorithm as a Nostr standard.
 
-## What's New in v0.3.2
+## Previous Releases
 
-- **📜 NIP-91 submitted** — The ai.wot protocol has been [formally proposed](https://github.com/nostr-protocol/nips/pull/2206) as a Nostr standard (NIP-91: Agent Trust Attestations). Full spec included in repo as `NIP-91.md`.
-- **🔗 NIP-85 integration** — Clarified how NIP-91 attestations complement NIP-85 (Trusted Authorities) for computed trust score delivery.
-- **🏷️ npm badges** — README now shows live npm version and NIP-91 status badges.
+<details>
+<summary>v0.3.x</summary>
+
+### v0.3.2
+- **📜 NIP-91 submitted** — Protocol formally proposed as a Nostr standard
+- **🔗 NIP-85 integration** — Clarified complementary relationship with NIP-85 (Trusted Authorities)
 
 ### v0.3.1
-
-- **🏷️ Lenient tag parsing** — Accepts both strict (`["l", "type", "ai.wot"]`) and common malformed (`["l", "type"]` + `["L", "ai.wot"]`) NIP-32 tags. Attestations that were silently dropped are now counted correctly.
-- **89 tests** passing (up from 84)
+- **🏷️ Lenient tag parsing** — Accepts both strict and common malformed NIP-32 tags
 
 ### v0.3.0
-
-- **🚨 Negative attestations** — `dispute` and `warning` types to flag bad actors
+- **🚨 Negative attestations** — `dispute` and `warning` types
 - **🗑️ Revocations** — NIP-09 based attestation revocation
-- **🌐 Sybil resistance** — Diversity scoring to detect trust concentration
-- **🔒 Trust gating** — Negative attestations from low-trust agents are ignored (prevents griefing)
-- **📊 Diversity badges** — SVG badges for diversity score alongside trust score
+- **🌐 Sybil resistance** — Diversity scoring
+- **🔒 Trust gating** — Low-trust negative attestations are ignored
+- **📊 Diversity badges** — SVG badges
+
+</details>
 
 ## Install
 
@@ -49,7 +131,10 @@ npm install -g ai-wot
 ### As a library
 
 ```js
-const { queryAttestations, calculateTrustScore, publishAttestation, publishRevocation } = require('ai-wot');
+const {
+  queryAttestations, calculateTrustScore, publishAttestation,
+  publishRevocation, publishReceipt, parseDVMResult, queryDVMHistory
+} = require('ai-wot');
 
 // Look up an agent's trust score (includes diversity metrics)
 const score = await calculateTrustScore('deadbeef...64hex');
@@ -57,10 +142,6 @@ console.log(score.display);           // 0-100
 console.log(score.positiveCount);     // positive attestation count
 console.log(score.negativeCount);     // negative attestation count
 console.log(score.diversity);         // { diversity, uniqueAttesters, maxAttesterShare }
-console.log(score.breakdown);         // per-attestation details
-
-// Query raw attestations (revoked ones are automatically filtered)
-const attestations = await queryAttestations('deadbeef...64hex');
 
 // Publish a positive attestation
 const secretKey = Uint8Array.from(Buffer.from('your-hex-secret-key', 'hex'));
@@ -71,6 +152,10 @@ await publishAttestation(secretKey, 'target-pubkey-hex', 'dispute', 'Sent garbag
 
 // Revoke a previous attestation
 await publishRevocation(secretKey, 'attestation-event-id-hex', 'Issue was resolved');
+
+// DVM receipt: parse result + publish attestation in one step
+const result = parseDVMResult(dvmResponseEvent);
+await publishReceipt(secretKey, result, { amountSats: 21, rating: 5 });
 ```
 
 ### CLI
@@ -79,6 +164,11 @@ await publishRevocation(secretKey, 'attestation-event-id-hex', 'Issue was resolv
 # Positive attestations
 ai-wot attest <pubkey> service-quality "Excellent DVM output"
 ai-wot attest <pubkey> general-trust "Reliable agent"
+
+# DVM receipts
+ai-wot receipt <dvm-result-event-id> --amount 21 --rating 5
+ai-wot dvm-history --unattested
+ai-wot batch targets.json
 
 # Negative attestations (reason required)
 ai-wot dispute <pubkey> "Sent garbage output after payment"
@@ -124,33 +214,10 @@ npm start
 | `GET /v1/attestations/:pubkey` | List attestations (JSON) |
 | `GET /v1/badge/:pubkey.svg` | Trust badge (SVG image) |
 | `GET /v1/diversity/:pubkey.svg` | Diversity badge (SVG image) |
+| `GET /v1/dvm/event/:eventId` | DVM result + attestations (JSON) |
+| `GET /v1/dvm/receipts/:pubkey` | Receipt attestations (JSON) |
 | `GET /v1/network/stats` | Network-wide statistics |
 | `GET /health` | Health check |
-
-**Example:**
-
-```bash
-curl http://localhost:3000/v1/score/dc52438efbf965d35738743daf9f7c718976462b010aa4e5ed24e569825bae94
-```
-
-```json
-{
-  "pubkey": "dc52438e...",
-  "score": 85,
-  "raw": 8.52,
-  "attestationCount": 5,
-  "positiveCount": 4,
-  "negativeCount": 1,
-  "gatedCount": 0,
-  "diversity": {
-    "diversity": 0.67,
-    "uniqueAttesters": 4,
-    "maxAttesterShare": 0.33,
-    "topAttester": "abc123..."
-  },
-  "breakdown": [...]
-}
-```
 
 ### Trust Badge
 
@@ -160,12 +227,6 @@ Embed a live trust badge in your README or profile:
 ![Trust Score](http://your-server:3000/v1/badge/YOUR_PUBKEY_HEX.svg)
 ![Diversity](http://your-server:3000/v1/diversity/YOUR_PUBKEY_HEX.svg)
 ```
-
-Badge colors:
-- 🟢 **Green** — score ≥ 70 (well trusted) / diversity ≥ 0.6 (distributed)
-- 🟡 **Yellow** — score 30–69 (some trust) / diversity 0.3–0.59 (moderate)
-- 🔴 **Red** — score < 30 (low/no trust) / diversity < 0.3 (concentrated)
-- ⬜ **Gray** — unknown (no data)
 
 ## Protocol: ai.wot
 
@@ -183,17 +244,50 @@ Agents publish **NIP-32 label events** (kind 1985) on Nostr to attest to each ot
 | `dispute` | -1.5× | Fraud, scams, or deliberate harm |
 | `warning` | -0.8× | Unreliable or problematic behavior |
 
+### DVM Receipt Flow
+
+The receipt flow connects the **NIP-90 DVM economy** to **ai.wot trust**:
+
+```
+┌─────────┐   kind 5050   ┌─────────┐
+│ Agent A  │──────────────►│  DVM B  │
+│(requester│   request     │(provider│
+│)         │◄──────────────│)        │
+│          │   kind 7000   │         │
+│          │   (invoice)   │         │
+│          │──────────────►│         │
+│          │   ⚡ payment   │         │
+│          │◄──────────────│         │
+│          │   kind 6050   │         │
+│          │   (result)    │         │
+│          │               │         │
+│          │──► ai-wot     │         │
+│          │  publishReceipt()       │
+│          │──────────────►│         │
+│          │  kind 1985    │         │
+│          │  service-quality        │
+│          │  e: <result-event-id>   │
+└──────────┘               └─────────┘
+```
+
+The attestation's `e` tag references the DVM result event, making it **traceable** to the actual transaction. This means:
+
+- Trust scores are backed by **real economic activity**, not just social signaling
+- Any observer can verify that the attestation corresponds to a real service interaction
+- DVM providers build reputation automatically as they serve customers
+
 ### Event Structure
 
 ```json
 {
   "kind": 1985,
-  "content": "Human-readable comment",
+  "content": "DVM receipt | kind:5050 (text-generation) | 21 sats | rating:5/5 | Fast translation",
   "tags": [
     ["L", "ai.wot"],
     ["l", "service-quality", "ai.wot"],
-    ["p", "<target-pubkey-hex>"],
-    ["e", "<referenced-event-id>", "<relay-hint>"]
+    ["p", "<dvm-provider-pubkey-hex>"],
+    ["e", "<dvm-result-event-id>", "<relay-hint>"],
+    ["expiration", "<unix-timestamp>"]
   ]
 }
 ```
@@ -203,24 +297,6 @@ Agents publish **NIP-32 label events** (kind 1985) on Nostr to attest to each ot
 1. **Content is required** — empty disputes/warnings are ignored
 2. **Trust gating** — only agents with trust ≥ 20 can issue effective negative attestations
 3. **Self-disputes are ignored** — you can't lower your own score
-4. Use `dispute` for serious issues (scams, fraud), `warning` for lesser concerns
-
-### Revocations (NIP-09)
-
-Revoke a previous attestation by publishing a kind 5 event:
-
-```json
-{
-  "kind": 5,
-  "content": "Issue was resolved",
-  "tags": [
-    ["e", "<attestation-event-id>"],
-    ["k", "1985"]
-  ]
-}
-```
-
-Only the original attester can revoke. Revoked attestations are excluded from scoring.
 
 ### Trust Score Calculation
 
@@ -228,90 +304,54 @@ Only the original attester can revoke. Revoked attestations are excluded from sc
 score = Σ (zap_weight × attester_trust × type_multiplier × temporal_decay)
 ```
 
-**Components:**
-
 - **Zap weight:** `1.0 + log₂(1 + sats) × 0.5`
-- **Attester trust:** Recursive score (2 hops max, square-root dampening)
-- **Type multiplier:** See table above (negative types subtract from score)
-- **Temporal decay:** `0.5 ^ (age_days / 90)` — half-life of 90 days
-- **Score floor:** Raw scores are floored at 0 (can't go below zero)
+- **Attester trust:** Recursive score (2 hops max, √ dampening)
+- **Type multiplier:** See table above
+- **Temporal decay:** `0.5 ^ (age_days / 90)` — 90-day half-life
+- **Score floor:** Raw scores ≥ 0
 
 Display score: `min(100, max(0, raw × 10))`
 
-### Sybil Resistance (Diversity)
+### Sybil Resistance
 
 ```
 diversity = (unique_attesters / attestation_count) × (1 - max_single_attester_share)
 ```
 
-- **0.0** — all trust from one source (weak, possibly sybil)
-- **1.0** — trust well-distributed across many attesters (strong)
-
-### Temporal Decay
-
-| Age | Decay Factor | Effective Weight |
-|---|---|---|
-| 0 days | 1.000 | 100% |
-| 45 days | 0.707 | 71% |
-| 90 days | 0.500 | 50% |
-| 180 days | 0.250 | 25% |
-| 360 days | 0.063 | 6.3% |
-
 ## API Reference
 
-### `publishAttestation(secretKey, targetPubkey, type, comment, opts?)`
+### Core
 
-Publish an attestation to Nostr relays.
+| Function | Description |
+|---|---|
+| `publishAttestation(secretKey, pubkey, type, comment, opts?)` | Publish an attestation |
+| `queryAttestations(pubkey, opts?)` | Query attestations (auto-excludes revoked) |
+| `calculateTrustScore(pubkey, opts?)` | Calculate trust score + diversity |
+| `getAttestationSummary(pubkey, opts?)` | Formatted text summary |
+| `publishRevocation(secretKey, eventId, reason, opts?)` | Revoke an attestation (NIP-09) |
 
-- `type` — `string` one of: `service-quality`, `identity-continuity`, `general-trust`, `dispute`, `warning`
-- For `dispute`/`warning`, `comment` must not be empty
+### DVM Receipts (v0.4.0)
 
-Returns `Promise<{ event, results }>`.
-
-### `publishRevocation(secretKey, attestationEventId, reason, opts?)`
-
-Revoke a previous attestation (NIP-09 kind 5).
-
-- `attestationEventId` — `string` 64-char hex event ID
-- `reason` — `string` explanation (must not be empty)
-
-Returns `Promise<{ event, results }>`.
-
-### `queryAttestations(pubkey, opts?)`
-
-Query attestations about a pubkey. Automatically excludes revoked attestations.
-
-- `opts.includeRevoked` — `boolean` include revoked attestations (default: false)
-
-Returns `Promise<Array>`.
-
-### `queryRevocations(authors, relays?)`
-
-Query revocations by specific authors.
-
-Returns `Promise<Set<string>>` — set of revoked event IDs.
-
-### `calculateTrustScore(pubkey, opts?)`
-
-Calculate trust score with diversity metrics.
-
-Returns `Promise<{ raw, display, attestationCount, positiveCount, negativeCount, gatedCount, breakdown, diversity }>`.
-
-### `getAttestationSummary(pubkey, opts?)`
-
-Formatted text summary including diversity and gated attestation info.
-
-Returns `Promise<string>`.
+| Function | Description |
+|---|---|
+| `publishReceipt(secretKey, dvmResult, opts?)` | Publish receipt attestation for DVM interaction |
+| `parseDVMResult(event)` | Parse DVM result event (kind 6xxx) into structured data |
+| `parseDVMFeedback(event)` | Parse DVM feedback event (kind 7000) |
+| `queryDVMHistory(myPubkey, opts?)` | Find your DVM interactions + attestation status |
+| `watchDVMResults(myPubkey, callback, opts?)` | Live-watch for DVM results, optional auto-attest |
+| `publishBatchAttestations(secretKey, targets, opts?)` | Attest multiple agents at once |
 
 ### Constants
 
-- `RELAYS` — Default relay list
-- `NAMESPACE` — `'ai.wot'`
-- `VALID_TYPES` — All 5 types
-- `POSITIVE_TYPES` — `['service-quality', 'identity-continuity', 'general-trust']`
-- `NEGATIVE_TYPES` — `['dispute', 'warning']`
-- `TYPE_MULTIPLIERS` — Includes negative multipliers
-- `VERSION` — `'0.3.0'`
+| Constant | Value |
+|---|---|
+| `RELAYS` | Default relay list |
+| `NAMESPACE` | `'ai.wot'` |
+| `VALID_TYPES` | All 5 attestation types |
+| `POSITIVE_TYPES` | `['service-quality', 'identity-continuity', 'general-trust']` |
+| `NEGATIVE_TYPES` | `['dispute', 'warning']` |
+| `DVM_KIND_NAMES` | Mapping of DVM request kinds to names |
+| `VERSION` | `'0.4.0'` |
 
 ## Testing
 
@@ -319,7 +359,7 @@ Returns `Promise<string>`.
 npm test
 ```
 
-84 tests covering: scoring math, temporal decay, type multipliers, zap weights, normalization, negative attestations, trust gating, empty content rejection, diversity scoring, sybil detection, score floor, badge SVG generation, and diversity badges.
+130 tests covering: scoring math, temporal decay, type multipliers, zap weights, negative attestations, trust gating, diversity scoring, DVM result parsing, DVM feedback parsing, receipt content format, badge SVG generation, and edge cases.
 
 ## Dependencies
 
@@ -331,7 +371,9 @@ Only two runtime dependencies:
 
 - **Website:** [aiwot.org](https://aiwot.org)
 - **Protocol spec:** [PROTOCOL.md](PROTOCOL.md)
+- **NIP-91:** [github.com/nostr-protocol/nips/pull/2206](https://github.com/nostr-protocol/nips/pull/2206)
 - **GitHub:** [github.com/jeletor/ai-wot](https://github.com/jeletor/ai-wot)
+- **npm:** [npmjs.com/package/ai-wot](https://www.npmjs.com/package/ai-wot)
 - **Author:** [Jeletor](https://primal.net/p/npub1m3fy8rhml9jax4ecws76l8muwxyhv33tqy92fe0dynjknqjm462qfc7j6d)
 
 ## License

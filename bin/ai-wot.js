@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 // ai-wot CLI — Web of Trust for AI agents on Nostr
-// v0.3.0: Added dispute, warn, revoke commands; diversity in output
+// v0.4.0: DVM receipts, batch attestations, DVM history
 //
 // Usage:
 //   ai-wot attest <pubkey> <type> "<comment>"
 //   ai-wot dispute <pubkey> "<reason>"
 //   ai-wot warn <pubkey> "<reason>"
 //   ai-wot revoke <event-id> "<reason>"
+//   ai-wot receipt <dvm-result-event-id> [--amount <sats>] [--rating <1-5>] [--comment "<text>"]
+//   ai-wot batch <file.json>
+//   ai-wot dvm-history [--kinds 5050,5100] [--unattested]
 //   ai-wot lookup <pubkey>
 //   ai-wot score <pubkey>
 //   ai-wot my-score
@@ -16,8 +19,12 @@ const path = require('path');
 const fs = require('fs');
 const wot = require('../lib/wot');
 const { NEGATIVE_TYPES, POSITIVE_TYPES } = require('../lib/scoring');
+const {
+  parseDVMResult, publishReceipt, queryDVMHistory,
+  publishBatchAttestations, DVM_KIND_NAMES
+} = require('../lib/receipts');
 
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 
 // ─── Key Loading ────────────────────────────────────────────────
 
@@ -235,6 +242,235 @@ async function myScoreCommand() {
   console.log(summary);
 }
 
+// ─── DVM Receipt Command ────────────────────────────────────────
+
+async function receiptCommand(args) {
+  if (args.length < 1) {
+    console.error('Usage: ai-wot receipt <dvm-result-event-id> [options]');
+    console.error('\nOptions:');
+    console.error('  --amount <sats>      Amount paid for the DVM service');
+    console.error('  --rating <1-5>       Quality rating');
+    console.error('  --comment "<text>"   Additional comment');
+    console.error('\nPublishes a service-quality attestation referencing a DVM interaction.');
+    console.error('The DVM result event is fetched from relays to extract provider pubkey.');
+    process.exit(1);
+  }
+
+  const keys = loadKeys();
+  if (!keys) {
+    console.error('❌ No keys found. Set NOSTR_SECRET_KEY env var or place nostr-keys.json in cwd.');
+    process.exit(1);
+  }
+
+  const resultEventId = args[0];
+  if (!/^[0-9a-f]{64}$/i.test(resultEventId)) {
+    console.error('❌ Invalid event ID. Must be a 64-character hex string.');
+    process.exit(1);
+  }
+
+  // Parse options
+  let amountSats = null;
+  let rating = null;
+  let comment = null;
+
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === '--amount' && args[i + 1]) {
+      amountSats = parseInt(args[++i], 10);
+    } else if (args[i] === '--rating' && args[i + 1]) {
+      rating = parseInt(args[++i], 10);
+    } else if (args[i] === '--comment' && args[i + 1]) {
+      comment = args[++i];
+    }
+  }
+
+  console.log('🔍 Fetching DVM result event from relays...\n');
+
+  // Fetch the DVM result event
+  const filter = { ids: [resultEventId] };
+  const events = await wot.queryRelays(filter);
+
+  if (events.length === 0) {
+    console.error('❌ Event not found on any relay. Check the event ID.');
+    process.exit(1);
+  }
+
+  const resultEvent = events[0];
+  const parsed = parseDVMResult(resultEvent);
+
+  if (!parsed) {
+    console.error(`❌ Event kind ${resultEvent.kind} is not a DVM result (expected 6000-6999).`);
+    process.exit(1);
+  }
+
+  console.log('📋 DVM Interaction:');
+  console.log(`   DVM Provider: ${parsed.dvmPubkey.substring(0, 16)}...`);
+  console.log(`   Service:      ${parsed.requestKindName} (kind ${parsed.requestKind})`);
+  console.log(`   Result ID:    ${parsed.resultEventId.substring(0, 16)}...`);
+  if (parsed.requestEventId) {
+    console.log(`   Request ID:   ${parsed.requestEventId.substring(0, 16)}...`);
+  }
+  if (amountSats || parsed.amountSats) {
+    console.log(`   Amount:       ${amountSats || parsed.amountSats} sats`);
+  }
+  if (rating) console.log(`   Rating:       ${rating}/5`);
+  console.log('');
+
+  console.log('📝 Publishing receipt attestation...\n');
+
+  const { event, results, receipt } = await publishReceipt(
+    keys.secretKey,
+    parsed,
+    { amountSats, rating, comment }
+  );
+
+  console.log(`Attestation ID: ${event.id}\n`);
+
+  for (const r of results) {
+    console.log(`  ${r.relay}: ${r.success ? '✅' : '❌ ' + (r.reason || 'Failed')}`);
+  }
+
+  const successCount = results.filter(r => r.success).length;
+  console.log(`\nPublished to ${successCount}/${results.length} relays`);
+
+  if (successCount > 0) {
+    console.log(`\n✅ DVM receipt published. Trust loop closed.`);
+    console.log(`   Content: "${receipt.comment}"`);
+    console.log(`\n🔗 View: https://primal.net/e/${event.id}`);
+  }
+}
+
+// ─── Batch Attestation Command ──────────────────────────────────
+
+async function batchCommand(args) {
+  if (args.length < 1) {
+    console.error('Usage: ai-wot batch <file.json>');
+    console.error('\nThe JSON file should contain an array of attestation targets:');
+    console.error('  [');
+    console.error('    { "pubkey": "abc...", "type": "service-quality", "comment": "Great DVM" },');
+    console.error('    { "pubkey": "def...", "type": "general-trust", "comment": "Reliable agent" }');
+    console.error('  ]');
+    console.error('\nEach entry can have: pubkey (required), type, comment, eventRef');
+    process.exit(1);
+  }
+
+  const keys = loadKeys();
+  if (!keys) {
+    console.error('❌ No keys found. Set NOSTR_SECRET_KEY env var or place nostr-keys.json in cwd.');
+    process.exit(1);
+  }
+
+  const filePath = args[0];
+  if (!fs.existsSync(filePath)) {
+    console.error(`❌ File not found: ${filePath}`);
+    process.exit(1);
+  }
+
+  let targets;
+  try {
+    targets = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  } catch (err) {
+    console.error(`❌ Invalid JSON: ${err.message}`);
+    process.exit(1);
+  }
+
+  if (!Array.isArray(targets) || targets.length === 0) {
+    console.error('❌ File must contain a non-empty array of targets.');
+    process.exit(1);
+  }
+
+  // Validate
+  for (const t of targets) {
+    if (!t.pubkey || !/^[0-9a-f]{64}$/i.test(t.pubkey)) {
+      console.error(`❌ Invalid pubkey: ${t.pubkey}`);
+      process.exit(1);
+    }
+    if (t.pubkey === keys.pubkey) {
+      console.error(`❌ Cannot self-attest (${t.pubkey.substring(0, 16)}...).`);
+      process.exit(1);
+    }
+  }
+
+  console.log(`📦 Batch attestation: ${targets.length} targets\n`);
+
+  const results = await publishBatchAttestations(keys.secretKey, targets);
+
+  let successCount = 0;
+  for (const r of results) {
+    const status = r.success ? '✅' : '❌';
+    const detail = r.error || `${r.results.filter(x => x.success).length} relays`;
+    console.log(`  ${status} ${r.pubkey.substring(0, 16)}... — ${detail}`);
+    if (r.success) successCount++;
+  }
+
+  console.log(`\n${successCount}/${targets.length} attestations published successfully.`);
+}
+
+// ─── DVM History Command ────────────────────────────────────────
+
+async function dvmHistoryCommand(args) {
+  const keys = loadKeys();
+  if (!keys) {
+    console.error('❌ No keys found. Set NOSTR_SECRET_KEY env var or place nostr-keys.json in cwd.');
+    process.exit(1);
+  }
+
+  // Parse options
+  let kinds = null;
+  let unattested = false;
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--kinds' && args[i + 1]) {
+      kinds = args[++i].split(',').map(k => parseInt(k, 10));
+    } else if (args[i] === '--unattested') {
+      unattested = true;
+    }
+  }
+
+  console.log('🔍 Querying DVM interaction history...\n');
+
+  const history = await queryDVMHistory(keys.pubkey, { kinds });
+
+  let filtered = history;
+  if (unattested) {
+    filtered = history.filter(h => !h.attested && h.result);
+  }
+
+  if (filtered.length === 0) {
+    console.log(unattested
+      ? '  No unattested DVM interactions found.'
+      : '  No DVM interactions found.');
+    return;
+  }
+
+  console.log(`  Found ${filtered.length} DVM interactions${unattested ? ' (unattested only)' : ''}:\n`);
+
+  for (const h of filtered) {
+    const date = new Date(h.request.createdAt * 1000).toISOString().split('T')[0];
+    const status = h.result ? '✅' : '⏳';
+    const attested = h.attested ? ' [attested]' : '';
+
+    console.log(`  ${status} ${date}  ${h.request.kindName} (kind ${h.request.kind})${attested}`);
+    console.log(`     Request: ${h.request.eventId.substring(0, 16)}...`);
+
+    if (h.result) {
+      console.log(`     Result:  ${h.result.resultEventId.substring(0, 16)}...`);
+      console.log(`     DVM:     ${h.result.dvmPubkey.substring(0, 16)}...`);
+      if (h.result.amountSats) {
+        console.log(`     Amount:  ${h.result.amountSats} sats`);
+      }
+    } else {
+      console.log(`     (no result yet)`);
+    }
+    console.log('');
+  }
+
+  const unattestedCount = filtered.filter(h => !h.attested && h.result).length;
+  if (unattestedCount > 0 && !unattested) {
+    console.log(`  💡 ${unattestedCount} interaction(s) not yet attested. Use --unattested to filter.`);
+    console.log(`     Use 'ai-wot receipt <result-event-id>' to publish a receipt.`);
+  }
+}
+
 function helpCommand() {
   console.log(`
 ╔══════════════════════════════════════════════════════╗
@@ -263,6 +499,25 @@ Commands:
     revoke <event-id> "<reason>"
       Revoke a previous attestation you published (NIP-09 deletion).
 
+  DVM Receipts (v0.4.0):
+    receipt <dvm-result-event-id> [options]
+      Publish a service-quality attestation referencing a DVM interaction.
+      Closes the economy→trust loop: pay for service → attest quality.
+      Options:
+        --amount <sats>      Amount paid
+        --rating <1-5>       Quality rating
+        --comment "<text>"   Additional note
+
+    dvm-history [options]
+      View your DVM interaction history and attestation status.
+      Options:
+        --kinds 5050,5100    Filter by DVM request kinds
+        --unattested         Show only unattested interactions
+
+    batch <file.json>
+      Publish attestations for multiple agents from a JSON file.
+      Format: [{ "pubkey": "...", "type": "...", "comment": "..." }, ...]
+
   Queries:
     lookup <pubkey>     Full trust profile with diversity metrics
     score <pubkey>      Trust score summary
@@ -282,8 +537,10 @@ Environment:
 
 Examples:
   ai-wot attest abc123...def service-quality "Great DVM output"
+  ai-wot receipt abc123...def --amount 21 --rating 5 --comment "Fast translation"
+  ai-wot dvm-history --unattested
+  ai-wot batch targets.json
   ai-wot dispute abc123...def "Sent garbage output after payment"
-  ai-wot warn abc123...def "Service intermittently unavailable"
   ai-wot revoke evt123...def "Issue was resolved"
   ai-wot score abc123...def
   ai-wot my-score
@@ -297,6 +554,9 @@ const COMMANDS = {
   dispute: disputeCommand,
   warn: warnCommand,
   revoke: revokeCommand,
+  receipt: receiptCommand,
+  batch: batchCommand,
+  'dvm-history': dvmHistoryCommand,
   lookup: lookupCommand,
   score: scoreCommand,
   'my-score': myScoreCommand,
