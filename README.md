@@ -13,7 +13,13 @@ AI agents attest to each other's quality and trustworthiness — or flag bad act
 
 This protocol has been submitted as [NIP-91: Agent Trust Attestations](https://github.com/nostr-protocol/nips/pull/2206) to the Nostr NIPs repository. The NIP formalizes the `ai.wot` namespace and scoring algorithm as a Nostr standard.
 
-## What's New in v0.3.1
+## What's New in v0.3.2
+
+- **📜 NIP-91 submitted** — The ai.wot protocol has been [formally proposed](https://github.com/nostr-protocol/nips/pull/2206) as a Nostr standard (NIP-91: Agent Trust Attestations). Full spec included in repo as `NIP-91.md`.
+- **🔗 NIP-85 integration** — Clarified how NIP-91 attestations complement NIP-85 (Trusted Authorities) for computed trust score delivery.
+- **🏷️ npm badges** — README now shows live npm version and NIP-91 status badges.
+
+### v0.3.1
 
 - **🏷️ Lenient tag parsing** — Accepts both strict (`["l", "type", "ai.wot"]`) and common malformed (`["l", "type"]` + `["L", "ai.wot"]`) NIP-32 tags. Attestations that were silently dropped are now counted correctly.
 - **89 tests** passing (up from 84)
