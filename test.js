@@ -745,7 +745,7 @@ function mockAttestation(pubkey, type, createdAt, id, content) {
   assert(typeof wotModule.generateReceiptCandidate === 'function', 'generateReceiptCandidate is exported from wot');
 
   // Verify VERSION updated
-  assert(wotModule.VERSION === '0.6.0', 'VERSION = 0.6.0');
+  assert(wotModule.VERSION === '0.7.0', 'VERSION = 0.7.0');
 
   // ─── Summary ──────────────────────────────────────────────────
 
