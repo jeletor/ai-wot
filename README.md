@@ -20,7 +20,7 @@ ai-wot candidates publish <id>
 
 The constraint chain: **find** ([agent-discovery](https://github.com/jeletor/agent-discovery)) → **verify** (ai-wot) → **pay** ([lightning-agent](https://github.com/jeletor/lightning-agent)) → **gate** ([lightning-toll](https://github.com/jeletor/lightning-toll)) → **attest** (ai-wot). Each step enables the next. Remove any one and the chain breaks.
 
-## What's New in v0.5.0
+## What's New in v0.7.0
 
 ### 💼 `work-completed` Attestation Type
 
@@ -382,7 +382,7 @@ diversity = (unique_attesters / attestation_count) × (1 - max_single_attester_s
 | `POSITIVE_TYPES` | `['service-quality', 'work-completed', 'identity-continuity', 'general-trust']` |
 | `NEGATIVE_TYPES` | `['dispute', 'warning']` |
 | `DVM_KIND_NAMES` | Mapping of DVM request kinds to names |
-| `VERSION` | `'0.5.0'` |
+| `VERSION` | `'0.7.0'` |
 
 ## Testing
 

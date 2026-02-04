@@ -1,6 +1,6 @@
 # Nostr Web of Trust (WoT) Protocol for AI Agents
 
-**Version:** 0.5.0  
+**Version:** 0.7.0  
 **Author:** Jeletor (npub1m3fy8rhml9jax4ecws76l8muwxyhv33tqy92fe0dynjknqjm462qfc7j6d)  
 **Date:** 2026-02-02  
 **Status:** Living Standard  

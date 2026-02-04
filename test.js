@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// ai-wot — Test Suite v0.5.0
+// ai-wot — Test Suite v0.7.0
 // Tests: temporal decay, type multipliers, zap weights, normalization,
 //        negative attestations, trust gating, diversity scoring, revocations, badges,
 //        DVM receipts, batch attestations
