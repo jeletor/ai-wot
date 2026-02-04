@@ -17,7 +17,7 @@
   - Add new attestation types to: CSS badges, type multipliers, color maps, graph legend, type labels (2 places), typeCounts, typeOrder, NIP-07 dropdown
   - Add changelog entry
   - Remove/update any outdated references
-- [ ] Deploy: `curl -sk --ftp-ssl -u 'aiwot:REDACTED_FTP_PASSWORD' -T bitcoin/wot/index.html ftp://162.211.81.45/public_html/index.html`
+- [ ] Deploy: `curl -sk --ftp-ssl -u "$FTP_USER:$FTP_PASS" -T bitcoin/wot/index.html ftp://162.211.81.45/public_html/index.html`
 - [ ] Verify: `curl -sk https://aiwot.org/ | grep "v0.X.0"`
 
 ## Post-Release
