@@ -3,12 +3,75 @@
 // Wraps the library server with a landing page and custom branding
 
 const http = require('http');
+const path = require('path');
+const fs = require('fs');
 const { createServer: createWotServer } = require('./lib/server');
+const { CandidateStore, filePersistence } = require('./lib/candidates');
 
 const PORT = parseInt(process.env.AI_WOT_PORT) || 8403;
+const CANDIDATES_DIR = path.join(process.env.HOME || '', '.ai-wot');
+const CANDIDATES_FILE = path.join(CANDIDATES_DIR, 'candidates.json');
+
+// ─── Nostr Key Loading ──────────────────────────────────────────
+
+function loadKeys() {
+  if (process.env.NOSTR_SECRET_KEY) {
+    const hex = process.env.NOSTR_SECRET_KEY;
+    if (/^[0-9a-f]{64}$/i.test(hex)) {
+      const secretKey = Uint8Array.from(Buffer.from(hex, 'hex'));
+      const { finalizeEvent } = require('nostr-tools/pure');
+      const event = finalizeEvent({
+        kind: 0, created_at: Math.floor(Date.now() / 1000), tags: [], content: ''
+      }, secretKey);
+      return { secretKey, pubkey: event.pubkey };
+    }
+  }
+
+  const searchPaths = [
+    path.join(process.cwd(), 'nostr-keys.json'),
+    path.join(process.env.HOME || '', '.nostr', 'keys.json'),
+    path.join(process.env.HOME || '', '.openclaw', 'workspace', 'bitcoin', 'nostr-keys.json')
+  ];
+
+  for (const p of searchPaths) {
+    if (fs.existsSync(p)) {
+      try {
+        const keys = JSON.parse(fs.readFileSync(p, 'utf-8'));
+        const secretKey = Uint8Array.from(Buffer.from(keys.secretKeyHex, 'hex'));
+        return { secretKey, pubkey: keys.publicKeyHex };
+      } catch (e) {
+        // continue to next path
+      }
+    }
+  }
+
+  return null;
+}
+
+// ─── Candidate Store Setup ──────────────────────────────────────
+
+if (!fs.existsSync(CANDIDATES_DIR)) {
+  fs.mkdirSync(CANDIDATES_DIR, { recursive: true });
+}
+
+const persistence = filePersistence(CANDIDATES_FILE);
+const candidateStore = new CandidateStore({
+  onPersist: (candidates) => persistence.save(candidates),
+  onCandidate: (c) => {
+    console.log(`📋 New candidate: ${c.id} (${c.type} for ${c.targetPubkey.substring(0, 12)}... from ${c.source})`);
+  },
+});
+candidateStore.load(persistence.load());
+
+const nostrKeys = loadKeys();
+if (nostrKeys) {
+  console.log(`🔑 Nostr keys loaded (${nostrKeys.pubkey.substring(0, 16)}...)`);
+} else {
+  console.log('⚠️  No Nostr keys found — candidate confirm endpoint will not auto-publish.');
+}
 
 // Create the underlying API server (don't start it, we'll use its handler)
-const wotApp = createWotServer({ port: PORT });
+const wotApp = createWotServer({ port: PORT, candidateStore, nostrKeys });
 
 const LANDING_HTML = `<!DOCTYPE html>
 <html lang="en">

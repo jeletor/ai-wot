@@ -733,6 +733,174 @@ function mockAttestation(pubkey, type, createdAt, id, content) {
   try { generateReceiptCandidate({ dvmPubkey: 'x'.padEnd(64, '0') }); } catch (e) { candidateError2 = true; }
   assert(candidateError2, 'Candidate: throws on missing resultEventId');
 
+  // ─── CandidateStore Tests (v0.7.0) ─────────────────────────────
+
+  console.log('\n📋 CandidateStore — CRUD');
+
+  const { CandidateStore, filePersistence, generateCandidate, generateL402Candidate } = require('./lib/candidates');
+
+  // Basic add + get
+  const store = new CandidateStore();
+  const c1 = store.add({
+    type: 'service-quality',
+    targetPubkey: 'target1'.padEnd(64, '0'),
+    comment: 'Great DVM service',
+    source: 'dvm',
+  });
+  assert(c1.id && c1.id.length === 16, 'Add: generates 16-char hex ID');
+  assert(c1.status === 'pending', 'Add: status = pending');
+  assert(c1.type === 'service-quality', 'Add: type preserved');
+  assert(c1.targetPubkey === 'target1'.padEnd(64, '0'), 'Add: targetPubkey preserved');
+  assert(c1.comment === 'Great DVM service', 'Add: comment preserved');
+  assert(c1.source === 'dvm', 'Add: source preserved');
+  assert(c1.createdAt > 0, 'Add: createdAt set');
+  assert(c1.publishedEventId === null, 'Add: publishedEventId = null');
+
+  const fetched = store.get(c1.id);
+  assert(fetched && fetched.id === c1.id, 'Get: returns correct candidate');
+  assert(store.get('nonexistent') === null, 'Get: returns null for unknown ID');
+
+  // List with filters
+  const c2 = store.add({
+    type: 'work-completed',
+    targetPubkey: 'target2'.padEnd(64, '0'),
+    comment: 'Work done',
+    source: 'l402',
+  });
+
+  const allPending = store.list({ status: 'pending' });
+  assert(allPending.length === 2, 'List: 2 pending candidates');
+
+  const dvmOnly = store.list({ source: 'dvm' });
+  assert(dvmOnly.length === 1 && dvmOnly[0].source === 'dvm', 'List: filter by source');
+
+  const limited = store.list({ limit: 1 });
+  assert(limited.length === 1, 'List: limit works');
+
+  // Confirm with edits
+  const confirmed = store.confirm(c1.id, { comment: 'Edited comment', type: 'general-trust' });
+  assert(confirmed.status === 'confirmed', 'Confirm: status = confirmed');
+  assert(confirmed.comment === 'Edited comment', 'Confirm: comment edited');
+  assert(confirmed.type === 'general-trust', 'Confirm: type edited');
+  assert(confirmed.updatedAt >= confirmed.createdAt, 'Confirm: updatedAt updated');
+
+  // Cannot confirm again
+  assert(store.confirm(c1.id) === null, 'Confirm: cannot re-confirm');
+
+  // Reject with reason
+  const rejected = store.reject(c2.id, 'Not relevant');
+  assert(rejected.status === 'rejected', 'Reject: status = rejected');
+  assert(rejected.metadata.rejectReason === 'Not relevant', 'Reject: reason stored');
+  assert(store.reject(c2.id) === null, 'Reject: cannot re-reject');
+
+  // Stats
+  const stats = store.stats();
+  assert(stats.pending === 0, 'Stats: 0 pending');
+  assert(stats.confirmed === 1, 'Stats: 1 confirmed');
+  assert(stats.rejected === 1, 'Stats: 1 rejected');
+  assert(stats.total === 2, 'Stats: total = 2');
+
+  // Mark published
+  const pub = store.markPublished(c1.id, 'event123'.padEnd(64, '0'));
+  assert(pub.status === 'published', 'MarkPublished: status = published');
+  assert(pub.publishedEventId === 'event123'.padEnd(64, '0'), 'MarkPublished: eventId stored');
+
+  console.log('\n📋 CandidateStore — Auto-Expiry');
+
+  const expiryStore = new CandidateStore({ maxAge: 100 }); // 100ms expiry
+  const expC = expiryStore.add({
+    type: 'service-quality',
+    targetPubkey: 'exp'.padEnd(64, '0'),
+    comment: 'Will expire',
+  });
+  // Force the createdAt to be old
+  expiryStore._candidates.get(expC.id).createdAt = Date.now() - 200;
+  const expList = expiryStore.list({ status: 'pending' });
+  assert(expList.length === 0, 'Auto-expiry: old candidate not listed as pending');
+  const expStats = expiryStore.stats();
+  assert(expStats.expired === 1, 'Auto-expiry: shows as expired in stats');
+
+  console.log('\n📋 CandidateStore — Max Candidates Eviction');
+
+  const smallStore = new CandidateStore({ maxCandidates: 2 });
+  smallStore.add({ type: 'service-quality', targetPubkey: 'a'.padEnd(64, '0'), comment: 'first' });
+  smallStore.add({ type: 'service-quality', targetPubkey: 'b'.padEnd(64, '0'), comment: 'second' });
+  smallStore.add({ type: 'service-quality', targetPubkey: 'c'.padEnd(64, '0'), comment: 'third' });
+  assert(smallStore._candidates.size <= 2, 'Eviction: store stays within maxCandidates');
+
+  console.log('\n📋 CandidateStore — File Persistence Round-Trip');
+
+  const tmpFile = '/tmp/ai-wot-test-candidates-' + Date.now() + '.json';
+  const persistence1 = filePersistence(tmpFile);
+  const storeA = new CandidateStore({ onPersist: (c) => persistence1.save(c) });
+  storeA.add({ type: 'service-quality', targetPubkey: 'persist1'.padEnd(64, '0'), comment: 'Persist test' });
+  storeA.add({ type: 'work-completed', targetPubkey: 'persist2'.padEnd(64, '0'), comment: 'Persist test 2' });
+
+  // Load into a new store
+  const storeB = new CandidateStore();
+  storeB.load(persistence1.load());
+  const storeB_list = storeB.list({});
+  assert(storeB_list.length === 2, 'File persistence: round-trip preserves 2 candidates');
+  assert(storeB_list.some(c => c.comment === 'Persist test'), 'File persistence: comment preserved');
+  assert(storeB_list.some(c => c.type === 'work-completed'), 'File persistence: type preserved');
+
+  // Clean up
+  try { require('fs').unlinkSync(tmpFile); } catch (_) {}
+
+  // Load from non-existent file
+  const emptyLoad = filePersistence('/tmp/ai-wot-nonexistent-' + Date.now() + '.json');
+  assert(emptyLoad.load().length === 0, 'File persistence: non-existent file returns empty array');
+
+  console.log('\n📋 CandidateStore — Validation');
+
+  let addError = false;
+  try { store.add({ type: 'service-quality', targetPubkey: 'x'.padEnd(64, '0') }); } catch (e) { addError = true; }
+  assert(addError, 'Add: throws on missing comment');
+
+  let addError2 = false;
+  try { store.add({ targetPubkey: 'x'.padEnd(64, '0'), comment: 'test' }); } catch (e) { addError2 = true; }
+  assert(addError2, 'Add: throws on missing type');
+
+  console.log('\n📋 CandidateStore — generateCandidate helper');
+
+  const helperStore = new CandidateStore();
+  const hc = generateCandidate(helperStore, {
+    targetPubkey: 'helper'.padEnd(64, '0'),
+    type: 'work-completed',
+    comment: 'Helper test',
+    source: 'dvm',
+    metadata: { task: 'generate' },
+  });
+  assert(hc.type === 'work-completed', 'generateCandidate: type correct');
+  assert(hc.source === 'dvm', 'generateCandidate: source correct');
+  assert(hc.metadata.task === 'generate', 'generateCandidate: metadata preserved');
+
+  console.log('\n📋 CandidateStore — generateL402Candidate helper');
+
+  const l402Store = new CandidateStore();
+  const l402c = generateL402Candidate(l402Store, {
+    providerPubkey: 'l402prov'.padEnd(64, '0'),
+    endpoint: '/api/v1/generate',
+    amountSats: 42,
+    paymentHash: 'hash123',
+    description: 'Text generation',
+  });
+  assert(l402c.type === 'work-completed', 'generateL402Candidate: type = work-completed');
+  assert(l402c.source === 'l402', 'generateL402Candidate: source = l402');
+  assert(l402c.comment.includes('L402 payment'), 'generateL402Candidate: comment starts with L402');
+  assert(l402c.comment.includes('42 sats'), 'generateL402Candidate: comment includes sats');
+  assert(l402c.comment.includes('/api/v1/generate'), 'generateL402Candidate: comment includes endpoint');
+  assert(l402c.metadata.amountSats === 42, 'generateL402Candidate: metadata.amountSats');
+
+  console.log('\n📋 CandidateStore — onCandidate callback');
+
+  let callbackCalled = false;
+  const cbStore = new CandidateStore({
+    onCandidate: (c) => { callbackCalled = true; },
+  });
+  cbStore.add({ type: 'service-quality', targetPubkey: 'cb'.padEnd(64, '0'), comment: 'Callback test' });
+  assert(callbackCalled, 'onCandidate callback fires on add');
+
   // ─── reaffirmAttestation Structure Tests (v0.6.0) ─────────────
 
   console.log('\n🔁 reaffirmAttestation Structure');

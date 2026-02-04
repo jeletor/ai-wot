@@ -23,8 +23,11 @@ const {
   parseDVMResult, publishReceipt, queryDVMHistory,
   publishBatchAttestations, DVM_KIND_NAMES
 } = require('../lib/receipts');
+const { CandidateStore, filePersistence } = require('../lib/candidates');
 
-const VERSION = '0.4.0';
+const VERSION = '0.7.0';
+const CANDIDATES_DIR = path.join(process.env.HOME || '', '.ai-wot');
+const CANDIDATES_FILE = path.join(CANDIDATES_DIR, 'candidates.json');
 
 // ─── Key Loading ────────────────────────────────────────────────
 
@@ -471,6 +474,247 @@ async function dvmHistoryCommand(args) {
   }
 }
 
+// ─── Candidate Commands ─────────────────────────────────────────
+
+function getCandidateStore() {
+  if (!fs.existsSync(CANDIDATES_DIR)) {
+    fs.mkdirSync(CANDIDATES_DIR, { recursive: true });
+  }
+  const persistence = filePersistence(CANDIDATES_FILE);
+  const store = new CandidateStore({
+    onPersist: (candidates) => persistence.save(candidates),
+  });
+  store.load(persistence.load());
+  return store;
+}
+
+async function candidatesCommand(args) {
+  const sub = args[0];
+
+  if (sub === 'confirm') return candidateConfirmCommand(args.slice(1));
+  if (sub === 'reject') return candidateRejectCommand(args.slice(1));
+  if (sub === 'confirm-all') return candidateConfirmAllCommand(args.slice(1));
+  if (sub === 'publish') return candidatePublishCommand(args.slice(1));
+  if (sub === 'stats') return candidateStatsCommand(args.slice(1));
+
+  // Default: list candidates
+  return candidateListCommand(args);
+}
+
+async function candidateListCommand(args) {
+  const store = getCandidateStore();
+  const filter = {};
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--status' && args[i + 1]) filter.status = args[++i];
+    else if (args[i] === '--source' && args[i + 1]) filter.source = args[++i];
+    else if (args[i] === '--limit' && args[i + 1]) filter.limit = parseInt(args[++i], 10);
+  }
+
+  if (!filter.status) filter.status = 'pending';
+  const candidates = store.list(filter);
+
+  if (candidates.length === 0) {
+    console.log(`📋 No ${filter.status} candidates found.`);
+    return;
+  }
+
+  console.log(`📋 ${candidates.length} ${filter.status} candidate(s):\n`);
+  for (const c of candidates) {
+    const age = Math.round((Date.now() - c.createdAt) / 60000);
+    const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age / 60)}h ago`;
+    console.log(`  ${c.id}  ${c.type}  ${c.source}`);
+    console.log(`    Target: ${c.targetPubkey.substring(0, 16)}...`);
+    console.log(`    Comment: "${c.comment}"`);
+    console.log(`    Created: ${ageStr}  Status: ${c.status}`);
+    console.log('');
+  }
+}
+
+async function candidateConfirmCommand(args) {
+  if (!args[0]) {
+    console.error('Usage: ai-wot candidates confirm <id> [--comment "..."] [--type ...]');
+    process.exit(1);
+  }
+
+  const store = getCandidateStore();
+  const id = args[0];
+  const edits = {};
+
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === '--comment' && args[i + 1]) edits.comment = args[++i];
+    else if (args[i] === '--type' && args[i + 1]) edits.type = args[++i];
+  }
+
+  const c = store.confirm(id, edits);
+  if (!c) {
+    console.error(`❌ Candidate ${id} not found or not pending.`);
+    process.exit(1);
+  }
+
+  console.log(`✅ Confirmed candidate ${id}`);
+  console.log(`   Type: ${c.type}`);
+  console.log(`   Target: ${c.targetPubkey.substring(0, 16)}...`);
+  console.log(`   Comment: "${c.comment}"`);
+  console.log(`\n   Use 'ai-wot candidates publish ${id}' to publish to relays.`);
+}
+
+async function candidateRejectCommand(args) {
+  if (!args[0]) {
+    console.error('Usage: ai-wot candidates reject <id> [--reason "..."]');
+    process.exit(1);
+  }
+
+  const store = getCandidateStore();
+  const id = args[0];
+  let reason = null;
+
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === '--reason' && args[i + 1]) reason = args[++i];
+  }
+
+  const c = store.reject(id, reason);
+  if (!c) {
+    console.error(`❌ Candidate ${id} not found or not pending.`);
+    process.exit(1);
+  }
+
+  console.log(`❌ Rejected candidate ${id}`);
+  if (reason) console.log(`   Reason: "${reason}"`);
+}
+
+async function candidateConfirmAllCommand(args) {
+  const store = getCandidateStore();
+  let source = null;
+  let publish = false;
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--source' && args[i + 1]) source = args[++i];
+    else if (args[i] === '--publish') publish = true;
+  }
+
+  const filter = { status: 'pending' };
+  if (source) filter.source = source;
+  const pending = store.list(filter);
+
+  if (pending.length === 0) {
+    console.log('📋 No pending candidates to confirm.');
+    return;
+  }
+
+  let confirmed = 0;
+  for (const c of pending) {
+    if (store.confirm(c.id)) confirmed++;
+  }
+  console.log(`✅ Confirmed ${confirmed} candidate(s).`);
+
+  if (publish) {
+    const keys = loadKeys();
+    if (!keys) {
+      console.error('❌ No keys found — confirmed but cannot publish. Set NOSTR_SECRET_KEY or place nostr-keys.json.');
+      return;
+    }
+
+    console.log('\n📡 Publishing all confirmed candidates...\n');
+    const results = await store.publishAllConfirmed(keys.secretKey);
+    let ok = 0;
+    for (const r of results) {
+      if (r.error) {
+        console.log(`  ❌ ${r.candidate.id}: ${r.error}`);
+      } else {
+        console.log(`  ✅ ${r.candidate.id} → ${r.event.id.substring(0, 16)}...`);
+        ok++;
+      }
+    }
+    console.log(`\n📡 Published ${ok}/${results.length} attestations.`);
+  }
+}
+
+async function candidatePublishCommand(args) {
+  const keys = loadKeys();
+  if (!keys) {
+    console.error('❌ No keys found. Set NOSTR_SECRET_KEY env var or place nostr-keys.json in cwd.');
+    process.exit(1);
+  }
+
+  const store = getCandidateStore();
+  let publishAll = false;
+  let id = null;
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--all') publishAll = true;
+    else if (!id) id = args[i];
+  }
+
+  if (publishAll) {
+    // Publish all confirmed candidates
+    const confirmed = store.list({ status: 'confirmed' });
+    if (confirmed.length === 0) {
+      console.log('📋 No confirmed candidates to publish. Confirm some first with `ai-wot candidates confirm <id>`.');
+      return;
+    }
+
+    console.log(`📡 Publishing ${confirmed.length} confirmed candidate(s)...\n`);
+    const results = await store.publishAllConfirmed(keys.secretKey);
+    let ok = 0;
+    for (const r of results) {
+      if (r.error) {
+        console.log(`  ❌ ${r.candidate.id}: ${r.error}`);
+      } else {
+        console.log(`  ✅ ${r.candidate.id} → ${r.event.id.substring(0, 16)}...`);
+        ok++;
+      }
+    }
+    console.log(`\n📡 Published ${ok}/${results.length} attestations.`);
+    return;
+  }
+
+  if (!id) {
+    console.error('Usage: ai-wot candidates publish <id> | ai-wot candidates publish --all');
+    process.exit(1);
+  }
+
+  // Confirm + publish a single candidate
+  const c = store.get(id);
+  if (!c) {
+    console.error(`❌ Candidate ${id} not found.`);
+    process.exit(1);
+  }
+
+  console.log(`📡 Publishing candidate ${id}...`);
+  console.log(`   Type: ${c.type}`);
+  console.log(`   Target: ${c.targetPubkey.substring(0, 16)}...`);
+  console.log(`   Comment: "${c.comment}"\n`);
+
+  const result = await store.confirmAndPublish(id, keys.secretKey);
+  if (!result) {
+    console.error(`❌ Could not publish candidate ${id} (not pending/confirmed?).`);
+    process.exit(1);
+  }
+
+  const successCount = result.results.filter(r => r.success).length;
+  for (const r of result.results) {
+    console.log(`  ${r.relay}: ${r.success ? '✅' : '❌ ' + (r.reason || 'Failed')}`);
+  }
+  console.log(`\n✅ Published to ${successCount}/${result.results.length} relays`);
+  console.log(`🔗 View: https://primal.net/e/${result.event.id}`);
+}
+
+async function candidateStatsCommand() {
+  const store = getCandidateStore();
+  const stats = store.stats();
+
+  console.log('📊 Candidate Store Stats:\n');
+  console.log(`   Pending:    ${stats.pending}`);
+  console.log(`   Confirmed:  ${stats.confirmed}`);
+  console.log(`   Published:  ${stats.published}`);
+  console.log(`   Rejected:   ${stats.rejected}`);
+  console.log(`   Expired:    ${stats.expired}`);
+  console.log(`   ─────────────────`);
+  console.log(`   Total:      ${stats.total}`);
+  console.log(`\n   File: ${CANDIDATES_FILE}`);
+}
+
 function helpCommand() {
   console.log(`
 ╔══════════════════════════════════════════════════════╗
@@ -523,6 +767,25 @@ Commands:
     score <pubkey>      Trust score summary
     my-score            Your own trust score
 
+  Candidates (v0.7.0):
+    candidates [--status pending] [--source dvm] [--limit 10]
+      List attestation candidates (default: pending).
+
+    candidates confirm <id> [--comment "..."] [--type ...]
+      Confirm a candidate for publishing.
+
+    candidates reject <id> [--reason "..."]
+      Reject a candidate.
+
+    candidates confirm-all [--source dvm] [--publish]
+      Confirm all pending candidates. With --publish, also publish.
+
+    candidates publish [<id>|--all]
+      Publish a confirmed candidate (or --all confirmed) to relays.
+
+    candidates stats
+      Show candidate store statistics.
+
   Other:
     help                Show this help message
 
@@ -557,6 +820,7 @@ const COMMANDS = {
   receipt: receiptCommand,
   batch: batchCommand,
   'dvm-history': dvmHistoryCommand,
+  candidates: candidatesCommand,
   lookup: lookupCommand,
   score: scoreCommand,
   'my-score': myScoreCommand,
