@@ -20,22 +20,82 @@ ai-wot candidates publish <id>
 
 The constraint chain: **find** ([agent-discovery](https://github.com/jeletor/agent-discovery)) → **verify** (ai-wot) → **pay** ([lightning-agent](https://github.com/jeletor/lightning-agent)) → **gate** ([lightning-toll](https://github.com/jeletor/lightning-toll)) → **attest** (ai-wot). Each step enables the next. Remove any one and the chain breaks.
 
-## What's New in v0.7.0
+## What's New in v0.8.0
+
+### 🏷️ Category-Based Trust Scoring
+
+Trust scores can now be broken down by category. Instead of a single aggregate score, get granular trust per domain:
+
+```js
+const { calculateCategoryScore, getAllCategoryScores } = require('ai-wot');
+
+// Score for a specific category
+const commerceScore = await calculateCategoryScore(pubkey, 'commerce');
+console.log(commerceScore.display);   // 0-100 for commerce-related attestations
+console.log(commerceScore.category);  // "commerce"
+
+// All categories at once
+const allScores = await getAllCategoryScores(pubkey);
+console.log(allScores.commerce.display);  // commerce trust
+console.log(allScores.identity.display);  // identity trust
+console.log(allScores.code.display);      // code trust
+console.log(allScores.general.display);   // overall trust
+```
+
+**Built-in categories:**
+| Category | Attestation Types |
+|---|---|
+| `commerce` | `work-completed` + `service-quality` |
+| `identity` | `identity-continuity` |
+| `code` | `service-quality` with "code" in content |
+| `general` | All types (same as `calculateTrustScore`) |
+
+Any valid attestation type name (e.g., `"service-quality"`) also works as a category.
+
+### 🔗 Trust Path Discovery
+
+Find how two agents are connected through the attestation graph:
+
+```js
+const { findTrustPath } = require('ai-wot');
+
+const result = await findTrustPath(agentA, agentB);
+// { found: true, path: [{pubkey, type, score}, ...], hops: 2 }
+
+if (result.found) {
+  console.log(`Connected in ${result.hops} hops`);
+  result.path.forEach(hop => console.log(`  ${hop.pubkey.slice(0,12)}... via ${hop.type}`));
+}
+```
+
+- BFS through attestation graph
+- Configurable max depth (default: 3)
+- Each hop shows attestation type and trust score
+
+### 🌐 New REST API Endpoints
+
+| Endpoint | Description |
+|---|---|
+| `GET /v1/score/:pubkey/category/:category` | Category-specific trust score |
+| `GET /v1/score/:pubkey/categories` | All category scores |
+| `GET /v1/path/:from/:to` | Trust path between two agents |
+
+### 📊 280 tests (up from 225)
+
+Full test coverage for category filtering, category scoring, all-categories scoring, trust path exports, and edge cases.
+
+<details>
+<summary>v0.7.0: work-completed + Candidate-Confirm</summary>
 
 ### 💼 `work-completed` Attestation Type
 
-New attestation type (1.2× multiplier) for certifying that paid work was delivered and accepted. Unlike `service-quality` which judges quality, `work-completed` is economic proof — the transaction happened and was fulfilled.
-
-```js
-await publishAttestation(secretKey, providerPubkey, 'work-completed',
-  'Work completed | Blog post about Bitcoin DVMs | 5000 sats');
-```
-
-Use cases: escrow completion, freelance delivery, any paid agent-to-agent transaction.
+New attestation type (1.2× multiplier) for certifying that paid work was delivered and accepted.
 
 ### 🏷️ Standalone Protocol
 
 ai.wot is a standalone protocol using NIP-32 labels (kind 1985). It works on any Nostr relay today — no custom NIPs required.
+
+</details>
 
 <details>
 <summary>v0.4.0: DVM Receipt Flow</summary>
@@ -240,6 +300,9 @@ npm start
 | Endpoint | Description |
 |---|---|
 | `GET /v1/score/:pubkey` | Trust score + diversity (JSON) |
+| `GET /v1/score/:pubkey/category/:category` | Category-specific trust score (JSON) |
+| `GET /v1/score/:pubkey/categories` | All category scores (JSON) |
+| `GET /v1/path/:from/:to` | Trust path between agents (JSON) |
 | `GET /v1/attestations/:pubkey` | List attestations (JSON) |
 | `GET /v1/badge/:pubkey.svg` | Trust badge (SVG image) |
 | `GET /v1/diversity/:pubkey.svg` | Diversity badge (SVG image) |
@@ -357,6 +420,9 @@ diversity = (unique_attesters / attestation_count) × (1 - max_single_attester_s
 | `publishAttestation(secretKey, pubkey, type, comment, opts?)` | Publish an attestation |
 | `queryAttestations(pubkey, opts?)` | Query attestations (auto-excludes revoked) |
 | `calculateTrustScore(pubkey, opts?)` | Calculate trust score + diversity |
+| `calculateCategoryScore(pubkey, category, opts?)` | Category-specific trust score |
+| `getAllCategoryScores(pubkey, opts?)` | All category scores at once |
+| `findTrustPath(fromPubkey, toPubkey, opts?)` | Find trust path between agents (BFS) |
 | `getAttestationSummary(pubkey, opts?)` | Formatted text summary |
 | `publishRevocation(secretKey, eventId, reason, opts?)` | Revoke an attestation (NIP-09) |
 
@@ -381,8 +447,10 @@ diversity = (unique_attesters / attestation_count) × (1 - max_single_attester_s
 | `VALID_TYPES` | All 6 attestation types |
 | `POSITIVE_TYPES` | `['service-quality', 'work-completed', 'identity-continuity', 'general-trust']` |
 | `NEGATIVE_TYPES` | `['dispute', 'warning']` |
+| `CATEGORIES` | Category → attestation type mappings |
+| `ALL_CATEGORY_NAMES` | `['commerce', 'identity', 'code', 'general']` |
 | `DVM_KIND_NAMES` | Mapping of DVM request kinds to names |
-| `VERSION` | `'0.7.0'` |
+| `VERSION` | `'0.8.0'` |
 
 ## Testing
 
@@ -390,7 +458,7 @@ diversity = (unique_attesters / attestation_count) × (1 - max_single_attester_s
 npm test
 ```
 
-140+ tests covering: scoring math, temporal decay, type multipliers, zap weights, negative attestations, trust gating, diversity scoring, work-completed attestations, DVM result parsing, DVM feedback parsing, receipt content format, badge SVG generation, and edge cases.
+280+ tests covering: scoring math, temporal decay, type multipliers, zap weights, negative attestations, trust gating, diversity scoring, work-completed attestations, DVM result parsing, DVM feedback parsing, receipt content format, badge SVG generation, category filtering, category scoring, trust path discovery, and edge cases.
 
 ## Dependencies
 

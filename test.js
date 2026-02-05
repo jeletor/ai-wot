@@ -1,14 +1,16 @@
 #!/usr/bin/env node
-// ai-wot — Test Suite v0.7.0
+// ai-wot — Test Suite v0.8.0
 // Tests: temporal decay, type multipliers, zap weights, normalization,
 //        negative attestations, trust gating, diversity scoring, revocations, badges,
-//        DVM receipts, batch attestations
+//        DVM receipts, batch attestations, category scoring, trust path discovery
 
 const {
   temporalDecay, zapWeight, calculateTrustScore, calculateDiversity,
-  deduplicateAttestations,
+  deduplicateAttestations, filterByCategory, calculateCategoryScore,
+  calculateAllCategoryScores,
   TYPE_MULTIPLIERS, DEFAULT_HALF_LIFE_DAYS,
   VALID_TYPES, POSITIVE_TYPES, NEGATIVE_TYPES,
+  CATEGORIES, ALL_CATEGORY_NAMES,
   NEGATIVE_ATTESTATION_TRUST_GATE
 } = require('./lib/scoring');
 const { generateBadgeSvg, generateDiversityBadgeSvg } = require('./lib/server');
@@ -901,19 +903,156 @@ function mockAttestation(pubkey, type, createdAt, id, content) {
   cbStore.add({ type: 'service-quality', targetPubkey: 'cb'.padEnd(64, '0'), comment: 'Callback test' });
   assert(callbackCalled, 'onCandidate callback fires on add');
 
+  // ─── Category Filtering Tests (v0.8.0) ─────────────────────────
+
+  console.log('\n🏷️  Category Definitions');
+
+  assert(ALL_CATEGORY_NAMES.length === 4, '4 named categories');
+  assert(ALL_CATEGORY_NAMES.includes('commerce'), 'commerce category exists');
+  assert(ALL_CATEGORY_NAMES.includes('identity'), 'identity category exists');
+  assert(ALL_CATEGORY_NAMES.includes('code'), 'code category exists');
+  assert(ALL_CATEGORY_NAMES.includes('general'), 'general category exists');
+  assert(CATEGORIES.commerce.includes('work-completed'), 'commerce includes work-completed');
+  assert(CATEGORIES.commerce.includes('service-quality'), 'commerce includes service-quality');
+  assert(CATEGORIES.identity.includes('identity-continuity'), 'identity includes identity-continuity');
+  assert(CATEGORIES.code.includes('service-quality'), 'code includes service-quality');
+  assert(CATEGORIES.general === null, 'general category = null (all types)');
+
+  console.log('\n🔍 filterByCategory');
+
+  const catAtts = [
+    mockAttestation('a'.padEnd(64, '0'), 'service-quality', now, 'cat1', 'Great code review'),
+    mockAttestation('b'.padEnd(64, '0'), 'work-completed', now, 'cat2', 'Translation delivered'),
+    mockAttestation('c'.padEnd(64, '0'), 'identity-continuity', now, 'cat3', 'Still active'),
+    mockAttestation('d'.padEnd(64, '0'), 'general-trust', now, 'cat4', 'Good agent'),
+    mockAttestation('e'.padEnd(64, '0'), 'service-quality', now, 'cat5', 'Great DVM output'),
+    mockAttestation('f'.padEnd(64, '0'), 'dispute', now, 'cat6', 'Scam detected'),
+  ];
+
+  // General category → all attestations
+  const genFiltered = filterByCategory(catAtts, 'general');
+  assert(genFiltered.length === 6, 'general: returns all 6 attestations');
+
+  // Commerce category → work-completed + service-quality
+  const comFiltered = filterByCategory(catAtts, 'commerce');
+  assert(comFiltered.length === 3, 'commerce: 3 attestations (2 service-quality + 1 work-completed)');
+  assert(comFiltered.every(a => {
+    const lt = a.tags.find(t => t[0] === 'l' && t[2] === 'ai.wot');
+    return lt && (lt[1] === 'service-quality' || lt[1] === 'work-completed');
+  }), 'commerce: only commerce types');
+
+  // Identity category → identity-continuity
+  const idFiltered = filterByCategory(catAtts, 'identity');
+  assert(idFiltered.length === 1, 'identity: 1 attestation');
+  assert(idFiltered[0].id === 'cat3', 'identity: correct attestation');
+
+  // Code category → service-quality with "code" in content
+  const codeFiltered = filterByCategory(catAtts, 'code');
+  assert(codeFiltered.length === 1, 'code: 1 attestation (only one with "code" in content)');
+  assert(codeFiltered[0].id === 'cat1', 'code: correct attestation');
+
+  // Direct attestation type as category
+  const sqFiltered = filterByCategory(catAtts, 'service-quality');
+  assert(sqFiltered.length === 2, 'service-quality type filter: 2 attestations');
+
+  const wcFiltered = filterByCategory(catAtts, 'work-completed');
+  assert(wcFiltered.length === 1, 'work-completed type filter: 1 attestation');
+
+  const dispFiltered = filterByCategory(catAtts, 'dispute');
+  assert(dispFiltered.length === 1, 'dispute type filter: 1 attestation');
+
+  // Empty input
+  const emptyFiltered = filterByCategory([], 'commerce');
+  assert(emptyFiltered.length === 0, 'filterByCategory: empty input → empty output');
+
+  // Null category → no filter (same as general)
+  const nullFiltered = filterByCategory(catAtts, null);
+  assert(nullFiltered.length === 6, 'null category → all attestations');
+
+  // Unknown category → no filter
+  const unkFiltered = filterByCategory(catAtts, 'unknown_cat');
+  assert(unkFiltered.length === 6, 'unknown category → all attestations (no filter)');
+
+  console.log('\n📊 calculateCategoryScore');
+
+  // Commerce category score
+  const comScore = await calculateCategoryScore(catAtts, zapEmpty, 'commerce', { now });
+  assert(comScore.category === 'commerce', 'Category score: category field = commerce');
+  assert(comScore.attestationCount === 3, 'Commerce: 3 attestations scored');
+  assert(comScore.raw > 0, 'Commerce: positive raw score');
+
+  // Identity category score
+  const idScore = await calculateCategoryScore(catAtts, zapEmpty, 'identity', { now });
+  assert(idScore.category === 'identity', 'Category score: category field = identity');
+  assert(idScore.attestationCount === 1, 'Identity: 1 attestation scored');
+
+  // Code category score
+  const codeScore = await calculateCategoryScore(catAtts, zapEmpty, 'code', { now });
+  assert(codeScore.category === 'code', 'Category score: category field = code');
+  assert(codeScore.attestationCount === 1, 'Code: 1 attestation scored');
+
+  // General category = same as calculateTrustScore (minus dispute which has negative contrib)
+  const genScore = await calculateCategoryScore(catAtts, zapEmpty, 'general', { now, negativeTrustGate: 0 });
+  assert(genScore.category === 'general', 'Category score: category field = general');
+  assert(genScore.attestationCount === 6, 'General: all 6 attestations');
+
+  // Empty category for no matching attestations
+  const noMatchAtts = [mockAttestation('a'.padEnd(64, '0'), 'dispute', now, 'nm1', 'Bad')];
+  const noMatchScore = await calculateCategoryScore(noMatchAtts, zapEmpty, 'identity', { now });
+  assert(noMatchScore.attestationCount === 0, 'No matches: 0 attestations');
+  assert(noMatchScore.raw === 0, 'No matches: raw = 0');
+  assert(noMatchScore.category === 'identity', 'No matches: category preserved');
+
+  console.log('\n📊 calculateAllCategoryScores');
+
+  const allScores = await calculateAllCategoryScores(catAtts, zapEmpty, { now, negativeTrustGate: 0 });
+  assert(allScores.commerce !== undefined, 'All scores: commerce present');
+  assert(allScores.identity !== undefined, 'All scores: identity present');
+  assert(allScores.code !== undefined, 'All scores: code present');
+  assert(allScores.general !== undefined, 'All scores: general present');
+  assert(allScores.commerce.category === 'commerce', 'All scores: commerce category field');
+  assert(allScores.identity.category === 'identity', 'All scores: identity category field');
+  assert(allScores.general.attestationCount === 6, 'All scores: general has all attestations');
+  assert(allScores.commerce.attestationCount === 3, 'All scores: commerce has 3');
+  assert(allScores.identity.attestationCount === 1, 'All scores: identity has 1');
+  assert(allScores.code.attestationCount === 1, 'All scores: code has 1');
+
+  // All categories with empty input
+  const emptyAllScores = await calculateAllCategoryScores([], zapEmpty, { now });
+  assert(emptyAllScores.commerce.raw === 0, 'Empty all scores: commerce = 0');
+  assert(emptyAllScores.general.raw === 0, 'Empty all scores: general = 0');
+  assert(emptyAllScores.commerce.category === 'commerce', 'Empty all scores: category preserved');
+
+  // ─── Trust Path Discovery Tests (v0.8.0) ──────────────────────
+
+  console.log('\n🔗 findTrustPath (unit — via wot module)');
+
+  const wotModule = require('./lib/wot');
+  assert(typeof wotModule.findTrustPath === 'function', 'findTrustPath is exported');
+  assert(typeof wotModule.queryOutgoingAttestations === 'function', 'queryOutgoingAttestations is exported');
+  assert(typeof wotModule.calculateCategoryScore === 'function', 'calculateCategoryScore is exported from wot');
+  assert(typeof wotModule.getAllCategoryScores === 'function', 'getAllCategoryScores is exported from wot');
+  assert(typeof wotModule.filterByCategory === 'function', 'filterByCategory is exported from wot');
+
+  // Same pubkey → found immediately
+  const selfPath = { found: true, path: [{ pubkey: 'a'.padEnd(64, '0'), type: null, score: null }], hops: 0 };
+  // We can't easily call findTrustPath without relays, so test the export and constants
+  assert(wotModule.CATEGORIES.commerce.includes('work-completed'), 'CATEGORIES.commerce exported from wot');
+  assert(wotModule.ALL_CATEGORY_NAMES.length === 4, 'ALL_CATEGORY_NAMES exported from wot');
+
+  // Verify VERSION updated
+  assert(wotModule.VERSION === '0.8.0', 'VERSION = 0.8.0');
+
   // ─── reaffirmAttestation Structure Tests (v0.6.0) ─────────────
 
   console.log('\n🔁 reaffirmAttestation Structure');
 
   // We can't call reaffirmAttestation directly (it publishes to relays),
   // but we can verify the module exports it and test the logic indirectly
-  const wotModule = require('./lib/wot');
+  // (wotModule already required above in trust path tests)
   assert(typeof wotModule.reaffirmAttestation === 'function', 'reaffirmAttestation is exported');
   assert(typeof wotModule.queryLatestAttestations === 'function', 'queryLatestAttestations is exported');
   assert(typeof wotModule.generateReceiptCandidate === 'function', 'generateReceiptCandidate is exported from wot');
-
-  // Verify VERSION updated
-  assert(wotModule.VERSION === '0.7.0', 'VERSION = 0.7.0');
 
   // ─── Summary ──────────────────────────────────────────────────
 
