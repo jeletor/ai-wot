@@ -216,6 +216,18 @@ const LANDING_HTML = `<!DOCTYPE html>
         <span class="desc">Trust score + diversity metrics</span>
       </div>
       <div class="endpoint">
+        <code>GET /v1/score/:pubkey/category/:cat</code>
+        <span class="desc">Category-specific score <span style="color:#ff9800;font-size:0.75rem;">NEW</span></span>
+      </div>
+      <div class="endpoint">
+        <code>GET /v1/score/:pubkey/categories</code>
+        <span class="desc">All category scores <span style="color:#ff9800;font-size:0.75rem;">NEW</span></span>
+      </div>
+      <div class="endpoint">
+        <code>GET /v1/path/:from/:to</code>
+        <span class="desc">Trust path between agents <span style="color:#ff9800;font-size:0.75rem;">NEW</span></span>
+      </div>
+      <div class="endpoint">
         <code>GET /v1/attestations/:pubkey</code>
         <span class="desc">Attestation list with decay</span>
       </div>
@@ -316,15 +328,18 @@ server.listen(PORT, () => {
   console.log('  🌐 Running on http://localhost:' + PORT);
   console.log('');
   console.log('  Endpoints:');
-  console.log('    GET /                             — Landing page');
-  console.log('    GET /v1/score/:pubkey             — Trust score');
-  console.log('    GET /v1/attestations/:pubkey      — Attestations');
-  console.log('    GET /v1/badge/:pubkey.svg         — Trust badge (SVG)');
-  console.log('    GET /v1/diversity/:pubkey.svg     — Diversity badge');
-  console.log('    GET /v1/dvm/event/:eventId        — DVM result');
-  console.log('    GET /v1/dvm/receipts/:pubkey      — DVM receipts');
-  console.log('    GET /v1/network/stats             — Network stats');
-  console.log('    GET /health                       — Health check');
+  console.log('    GET /                               — Landing page');
+  console.log('    GET /v1/score/:pubkey               — Trust score');
+  console.log('    GET /v1/score/:pubkey/category/:c   — Category score (v0.8)');
+  console.log('    GET /v1/score/:pubkey/categories    — All categories (v0.8)');
+  console.log('    GET /v1/path/:from/:to              — Trust path (v0.8)');
+  console.log('    GET /v1/attestations/:pubkey        — Attestations');
+  console.log('    GET /v1/badge/:pubkey.svg           — Trust badge (SVG)');
+  console.log('    GET /v1/diversity/:pubkey.svg       — Diversity badge');
+  console.log('    GET /v1/dvm/event/:eventId          — DVM result');
+  console.log('    GET /v1/dvm/receipts/:pubkey        — DVM receipts');
+  console.log('    GET /v1/network/stats               — Network stats');
+  console.log('    GET /health                         — Health check');
   console.log('');
 });
 
